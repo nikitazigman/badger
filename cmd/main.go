@@ -1,7 +1,12 @@
 package main
 
-import "fmt"
+import (
+	"os"
+
+	"github.com/nikitazigman/badger/internal/cli"
+)
 
 func main() {
-	fmt.Println("Hello world")
+	exitCode := cli.Run(os.Args[1:], os.Stdout, os.Stderr)
+	os.Exit(int(exitCode))
 }
