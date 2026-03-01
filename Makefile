@@ -13,8 +13,8 @@ build: ## Build the main binary
 	@mkdir -p $(dir $(BINARY))
 	go build -o $(BINARY) $(MAIN)
 
-run: ## Run the main program
-	go run $(MAIN)
+run: ## Run the main program (pass ARGS='...')
+	go run $(MAIN) $(ARGS)
 
 test: ## Run all tests
-	go test ./...
+	go test -v ./...
