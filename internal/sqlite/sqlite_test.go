@@ -109,26 +109,26 @@ func TestParseBTreePageLeafPageFromSampleFixture(t *testing.T) {
 		t.Fatalf("parseBTreePage returned error: %v", err)
 	}
 
-	if got.PageKind != 0x0d {
-		t.Fatalf("PageKind = 0x%02x, want 0x0d", got.PageKind)
+	if got.PageHeader.PageKind != 0x0d {
+		t.Fatalf("PageKind = 0x%02x, want 0x0d", got.PageHeader.PageKind)
 	}
-	if got.HeaderSize != 8 {
-		t.Fatalf("HeaderSize = %d, want 8", got.HeaderSize)
+	if got.PageHeader.HeaderSize != 8 {
+		t.Fatalf("HeaderSize = %d, want 8", got.PageHeader.HeaderSize)
 	}
-	if got.FirstFreeblock != 0 {
-		t.Fatalf("FirstFreeblock = %d, want 0", got.FirstFreeblock)
+	if got.PageHeader.FirstFreeblock != 0 {
+		t.Fatalf("FirstFreeblock = %d, want 0", got.PageHeader.FirstFreeblock)
 	}
-	if got.CellCount != 3 {
-		t.Fatalf("CellCount = %d, want 3", got.CellCount)
+	if got.PageHeader.CellCount != 3 {
+		t.Fatalf("CellCount = %d, want 3", got.PageHeader.CellCount)
 	}
-	if got.CellContentAreaOffset != 3779 {
-		t.Fatalf("CellContentAreaOffset = %d, want 3779", got.CellContentAreaOffset)
+	if got.PageHeader.CellContentAreaOffset != 3779 {
+		t.Fatalf("CellContentAreaOffset = %d, want 3779", got.PageHeader.CellContentAreaOffset)
 	}
-	if got.FragmentedFreeBytes != 0 {
-		t.Fatalf("FragmentedFreeBytes = %d, want 0", got.FragmentedFreeBytes)
+	if got.PageHeader.FragmentedFreeBytes != 0 {
+		t.Fatalf("FragmentedFreeBytes = %d, want 0", got.PageHeader.FragmentedFreeBytes)
 	}
-	if got.RightMostPointer != nil {
-		t.Fatalf("RightMostPointer = %v, want nil for leaf page", *got.RightMostPointer)
+	if got.PageHeader.RightMostPointer != nil {
+		t.Fatalf("RightMostPointer = %v, want nil for leaf page", *got.PageHeader.RightMostPointer)
 	}
 	wantPointers := []uint16{3983, 3901, 3779}
 	if !equalUint16Slice(got.CellPointers, wantPointers) {
@@ -148,20 +148,20 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 			t.Fatalf("parseBTreePage returned error: %v", err)
 		}
 
-		if got.PageKind != 0x05 {
-			t.Fatalf("PageKind = 0x%02x, want 0x05", got.PageKind)
+		if got.PageHeader.PageKind != 0x05 {
+			t.Fatalf("PageKind = 0x%02x, want 0x05", got.PageHeader.PageKind)
 		}
-		if got.HeaderSize != 12 {
-			t.Fatalf("HeaderSize = %d, want 12", got.HeaderSize)
+		if got.PageHeader.HeaderSize != 12 {
+			t.Fatalf("HeaderSize = %d, want 12", got.PageHeader.HeaderSize)
 		}
-		if got.CellCount != 4 {
-			t.Fatalf("CellCount = %d, want 4", got.CellCount)
+		if got.PageHeader.CellCount != 4 {
+			t.Fatalf("CellCount = %d, want 4", got.PageHeader.CellCount)
 		}
-		if got.CellContentAreaOffset != 4065 {
-			t.Fatalf("CellContentAreaOffset = %d, want 4065", got.CellContentAreaOffset)
+		if got.PageHeader.CellContentAreaOffset != 4065 {
+			t.Fatalf("CellContentAreaOffset = %d, want 4065", got.PageHeader.CellContentAreaOffset)
 		}
-		if got.RightMostPointer == nil || *got.RightMostPointer != 1644 {
-			t.Fatalf("RightMostPointer = %v, want 1644", got.RightMostPointer)
+		if got.PageHeader.RightMostPointer == nil || *got.PageHeader.RightMostPointer != 1644 {
+			t.Fatalf("RightMostPointer = %v, want 1644", got.PageHeader.RightMostPointer)
 		}
 		wantPointers := []uint16{4089, 4081, 4073, 4065}
 		if !equalUint16Slice(got.CellPointers, wantPointers) {
@@ -178,20 +178,20 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 			t.Fatalf("parseBTreePage returned error: %v", err)
 		}
 
-		if got.PageKind != 0x02 {
-			t.Fatalf("PageKind = 0x%02x, want 0x02", got.PageKind)
+		if got.PageHeader.PageKind != 0x02 {
+			t.Fatalf("PageKind = 0x%02x, want 0x02", got.PageHeader.PageKind)
 		}
-		if got.HeaderSize != 12 {
-			t.Fatalf("HeaderSize = %d, want 12", got.HeaderSize)
+		if got.PageHeader.HeaderSize != 12 {
+			t.Fatalf("HeaderSize = %d, want 12", got.PageHeader.HeaderSize)
 		}
-		if got.CellCount != 1 {
-			t.Fatalf("CellCount = %d, want 1", got.CellCount)
+		if got.PageHeader.CellCount != 1 {
+			t.Fatalf("CellCount = %d, want 1", got.PageHeader.CellCount)
 		}
-		if got.CellContentAreaOffset != 4078 {
-			t.Fatalf("CellContentAreaOffset = %d, want 4078", got.CellContentAreaOffset)
+		if got.PageHeader.CellContentAreaOffset != 4078 {
+			t.Fatalf("CellContentAreaOffset = %d, want 4078", got.PageHeader.CellContentAreaOffset)
 		}
-		if got.RightMostPointer == nil || *got.RightMostPointer != 1850 {
-			t.Fatalf("RightMostPointer = %v, want 1850", got.RightMostPointer)
+		if got.PageHeader.RightMostPointer == nil || *got.PageHeader.RightMostPointer != 1850 {
+			t.Fatalf("RightMostPointer = %v, want 1850", got.PageHeader.RightMostPointer)
 		}
 		wantPointers := []uint16{4078}
 		if !equalUint16Slice(got.CellPointers, wantPointers) {
@@ -209,16 +209,16 @@ func TestParseBTreePageIndexLeafFromFixture(t *testing.T) {
 		t.Fatalf("parseBTreePage returned error: %v", err)
 	}
 
-	if got.PageKind != 0x0a {
-		t.Fatalf("PageKind = 0x%02x, want 0x0a", got.PageKind)
+	if got.PageHeader.PageKind != 0x0a {
+		t.Fatalf("PageKind = 0x%02x, want 0x0a", got.PageHeader.PageKind)
 	}
-	if got.HeaderSize != 8 {
-		t.Fatalf("HeaderSize = %d, want 8", got.HeaderSize)
+	if got.PageHeader.HeaderSize != 8 {
+		t.Fatalf("HeaderSize = %d, want 8", got.PageHeader.HeaderSize)
 	}
-	if got.CellCount != 448 {
-		t.Fatalf("CellCount = %d, want 448", got.CellCount)
+	if got.PageHeader.CellCount != 448 {
+		t.Fatalf("CellCount = %d, want 448", got.PageHeader.CellCount)
 	}
-	if got.RightMostPointer != nil {
+	if got.PageHeader.RightMostPointer != nil {
 		t.Fatal("RightMostPointer must be nil for leaf page")
 	}
 	if len(got.CellPointers) != 448 {
