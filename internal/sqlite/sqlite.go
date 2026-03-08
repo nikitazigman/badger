@@ -157,17 +157,6 @@ func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
 	}, nil
 }
 
-type PageHeader struct {
-	PageKind              uint8
-	HeaderOffsetInPage    uint16
-	HeaderSize            uint8
-	FirstFreeblock        uint16
-	CellCount             uint16
-	CellContentAreaOffset uint16
-	FragmentedFreeBytes   uint8
-	RightMostPointer      *uint32
-}
-
 type PageInspection struct {
 	PageNumber   uint32
 	DBHeader     *DBHeader
@@ -183,7 +172,7 @@ func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
 
 	if number == 1 {
 		// first 100 bytes belong to the DB Header
-		page, err := parseBTreePage(page, number, 100)
+		page, err := parseBTreePage(page[100:], number)
 		if err != nil {
 			return nil, err
 		}
@@ -191,73 +180,79 @@ func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
 		return page, nil
 	}
 
-	return parseBTreePage(page, number, 0)
+	return parseBTreePage(page, number)
 }
 
-func parseBTreePage(page []byte, pageNumber uint32, headerOffset uint16) (*PageInspection, error) {
-	base := int(headerOffset)
-	if len(page) < base+8 {
-		return nil, fmt.Errorf("page %d is too short for b-tree header at offset %d", pageNumber, headerOffset)
+func parseBTreePage(page []byte, pageNumber uint32) (*PageInspection, error) {
+	pageHeader, err := parsePageHeader(page)
+	if err != nil {
+		return nil, err
 	}
 
-	pageKind := page[base]
-	switch pageKind {
-	case 0x02, 0x05, 0x0a, 0x0d:
-	default:
-		return nil, fmt.Errorf("page %d has unsupported b-tree page kind 0x%02x", pageNumber, pageKind)
-	}
-
-	headerSize := uint8(8)
-	if pageKind == 0x02 || pageKind == 0x05 {
-		headerSize = 12
-	}
-
-	if len(page) < base+int(headerSize) {
-		return nil, fmt.Errorf("page %d is too short for %d-byte b-tree header at offset %d", pageNumber, headerSize, headerOffset)
-	}
-
-	firstFreeblock := binary.BigEndian.Uint16(page[base+1 : base+3])
-	cellCount := binary.BigEndian.Uint16(page[base+3 : base+5])
-	cellContentAreaOffset := binary.BigEndian.Uint16(page[base+5 : base+7])
-	fragmentedFreeBytes := page[base+7]
-
-	var rightMostPointer *uint32
-	if headerSize == 12 {
-		value := binary.BigEndian.Uint32(page[base+8 : base+12])
-		rightMostPointer = &value
-	}
-
-	cellPointerStart := uint16(base) + uint16(headerSize)
-	cellPointerEnd := cellPointerStart + cellCount*2
-	if len(page) < int(cellPointerEnd) {
-		return nil, fmt.Errorf(
-			"page %d cell pointer array out of range: need %d bytes at offset %d (len=%d)",
-			pageNumber,
-			int(cellCount)*2,
-			cellPointerStart,
-			len(page),
-		)
-	}
-
-	cellPointers := make([]uint16, 0, cellCount)
-	for idx := range cellCount {
-		ptrOffset := cellPointerStart + idx*2
+	cellPointers := make([]uint16, 0, pageHeader.CellCount)
+	headerSize := uint16(pageHeader.HeaderSize())
+	for idx := range pageHeader.CellCount {
+		ptrOffset := headerSize + idx*2
 		cellPointer := binary.BigEndian.Uint16(page[ptrOffset : ptrOffset+2])
 		cellPointers = append(cellPointers, cellPointer)
 	}
 
 	return &PageInspection{
-		PageNumber: pageNumber,
-		PageHeader: PageHeader{
-			PageKind:              pageKind,
-			HeaderOffsetInPage:    headerOffset,
-			HeaderSize:            headerSize,
-			FirstFreeblock:        firstFreeblock,
-			CellCount:             cellCount,
-			CellContentAreaOffset: cellContentAreaOffset,
-			FragmentedFreeBytes:   fragmentedFreeBytes,
-			RightMostPointer:      rightMostPointer,
-		},
+		PageNumber:   pageNumber,
+		PageHeader:   *pageHeader,
 		CellPointers: cellPointers,
 	}, nil
+}
+
+type PageKindType int8
+
+const (
+	InteriorIndexBTreePage PageKindType = 0x02
+	InteriorTableBTreePage PageKindType = 0x05
+	LeafIndexBTreePage     PageKindType = 0x0a
+	LeafTableBTreePage     PageKindType = 0x0d
+)
+
+type PageHeader struct {
+	PageKind              PageKindType
+	FirstFreeblock        uint16
+	CellCount             uint16
+	CellContentAreaOffset uint16
+	FragmentedFreeBytes   uint8
+	RightMostPointer      *uint32
+}
+
+func (h *PageHeader) HeaderSize() int {
+	if h.IsInterior() {
+		return 12
+	}
+	return 8
+}
+
+func (h *PageHeader) IsInterior() bool {
+	if h.PageKind == InteriorIndexBTreePage || h.PageKind == InteriorTableBTreePage {
+		return true
+	}
+	return false
+}
+
+func parsePageHeader(header []byte) (*PageHeader, error) {
+	pageHeader := &PageHeader{}
+	pageHeader.PageKind = PageKindType(header[0])
+	switch pageHeader.PageKind {
+	case InteriorIndexBTreePage, InteriorTableBTreePage, LeafIndexBTreePage, LeafTableBTreePage:
+	default:
+		return nil, fmt.Errorf("page has unsupported b-tree page kind 0x%02x", pageHeader.PageKind)
+	}
+
+	pageHeader.FirstFreeblock = binary.BigEndian.Uint16(header[1:3])
+	pageHeader.CellCount = binary.BigEndian.Uint16(header[3:5])
+	pageHeader.CellContentAreaOffset = binary.BigEndian.Uint16(header[5:7])
+	pageHeader.FragmentedFreeBytes = header[7]
+
+	if pageHeader.IsInterior() {
+		value := binary.BigEndian.Uint32(header[8:12])
+		pageHeader.RightMostPointer = &value
+	}
+	return pageHeader, nil
 }
