@@ -354,70 +354,6 @@ func TestDecodeVarint(t *testing.T) {
 	}
 }
 
-func TestLocalPayloadSize(t *testing.T) {
-	t.Parallel()
-
-	t.Run("table_leaf_thresholds", func(t *testing.T) {
-		t.Parallel()
-
-		gotAtThreshold, err := localPayloadSize(LeafTableBTreePage, fixturePageSize, 4061)
-		if err != nil {
-			t.Fatalf("localPayloadSize returned error: %v", err)
-		}
-		if gotAtThreshold != 4061 {
-			t.Fatalf("localPayloadSize threshold = %d, want 4061", gotAtThreshold)
-		}
-
-		gotAboveThreshold, err := localPayloadSize(LeafTableBTreePage, fixturePageSize, 4062)
-		if err != nil {
-			t.Fatalf("localPayloadSize returned error: %v", err)
-		}
-		if gotAboveThreshold != 489 {
-			t.Fatalf("localPayloadSize above threshold = %d, want 489", gotAboveThreshold)
-		}
-	})
-
-	t.Run("index_leaf_thresholds", func(t *testing.T) {
-		t.Parallel()
-
-		gotAtThreshold, err := localPayloadSize(LeafIndexBTreePage, fixturePageSize, 1002)
-		if err != nil {
-			t.Fatalf("localPayloadSize returned error: %v", err)
-		}
-		if gotAtThreshold != 1002 {
-			t.Fatalf("localPayloadSize threshold = %d, want 1002", gotAtThreshold)
-		}
-
-		gotAboveThreshold, err := localPayloadSize(LeafIndexBTreePage, fixturePageSize, 1003)
-		if err != nil {
-			t.Fatalf("localPayloadSize returned error: %v", err)
-		}
-		if gotAboveThreshold != 489 {
-			t.Fatalf("localPayloadSize above threshold = %d, want 489", gotAboveThreshold)
-		}
-	})
-
-	t.Run("index_interior_thresholds", func(t *testing.T) {
-		t.Parallel()
-
-		gotAtThreshold, err := localPayloadSize(InteriorIndexBTreePage, fixturePageSize, 1002)
-		if err != nil {
-			t.Fatalf("localPayloadSize returned error: %v", err)
-		}
-		if gotAtThreshold != 1002 {
-			t.Fatalf("localPayloadSize threshold = %d, want 1002", gotAtThreshold)
-		}
-
-		gotAboveThreshold, err := localPayloadSize(InteriorIndexBTreePage, fixturePageSize, 1003)
-		if err != nil {
-			t.Fatalf("localPayloadSize returned error: %v", err)
-		}
-		if gotAboveThreshold != 489 {
-			t.Fatalf("localPayloadSize above threshold = %d, want 489", gotAboveThreshold)
-		}
-	})
-}
-
 func TestCellParsersFromFixtures(t *testing.T) {
 	t.Parallel()
 
@@ -520,11 +456,6 @@ func equalUint16Slice(got []uint16, want []uint16) bool {
 	return true
 }
 
-func parseBTreePageForTest(page []byte, pageNumber uint32) (*PageInspection, error) {
-	inspector := &Inspector{
-		dbHeader: &DBHeader{
-			ReservedBytesPerPage: 0,
-		},
-	}
-	return inspector.parseBTreePage(page, pageNumber)
+func parseBTreePageForTest(page []byte, pageNumber uint32) (*BTreePage, error) {
+	return parseBTreePage(page, pageNumber, 0)
 }
