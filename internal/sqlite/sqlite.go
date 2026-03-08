@@ -149,23 +149,15 @@ func (i *Inspector) readPage(number uint32) ([]byte, error) {
 
 type MetadataInspection struct {
 	DBHeader DBHeader
-	Page     *PageInspection
 }
 
 func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
-	page, err := i.InspectPage(1)
-	if err != nil {
-		return nil, err
-	}
-
 	return &MetadataInspection{
 		DBHeader: *i.dbHeader,
-		Page:     page,
 	}, nil
 }
 
-type PageInspection struct {
-	PageNumber            uint32
+type PageHeader struct {
 	PageKind              uint8
 	HeaderOffsetInPage    uint16
 	HeaderSize            uint8
@@ -174,7 +166,13 @@ type PageInspection struct {
 	CellContentAreaOffset uint16
 	FragmentedFreeBytes   uint8
 	RightMostPointer      *uint32
-	CellPointers          []uint16
+}
+
+type PageInspection struct {
+	PageNumber   uint32
+	DBHeader     *DBHeader
+	PageHeader   PageHeader
+	CellPointers []uint16
 }
 
 func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
@@ -183,12 +181,17 @@ func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
 		return nil, err
 	}
 
-	headerOffset := uint16(0)
 	if number == 1 {
-		headerOffset = 100
+		// first 100 bytes belong to the DB Header
+		page, err := parseBTreePage(page, number, 100)
+		if err != nil {
+			return nil, err
+		}
+		page.DBHeader = i.dbHeader
+		return page, nil
 	}
 
-	return parseBTreePage(page, number, headerOffset)
+	return parseBTreePage(page, number, 0)
 }
 
 func parseBTreePage(page []byte, pageNumber uint32, headerOffset uint16) (*PageInspection, error) {
@@ -244,15 +247,17 @@ func parseBTreePage(page []byte, pageNumber uint32, headerOffset uint16) (*PageI
 	}
 
 	return &PageInspection{
-		PageNumber:            pageNumber,
-		PageKind:              pageKind,
-		HeaderOffsetInPage:    headerOffset,
-		HeaderSize:            headerSize,
-		FirstFreeblock:        firstFreeblock,
-		CellCount:             cellCount,
-		CellContentAreaOffset: cellContentAreaOffset,
-		FragmentedFreeBytes:   fragmentedFreeBytes,
-		RightMostPointer:      rightMostPointer,
-		CellPointers:          cellPointers,
+		PageNumber: pageNumber,
+		PageHeader: PageHeader{
+			PageKind:              pageKind,
+			HeaderOffsetInPage:    headerOffset,
+			HeaderSize:            headerSize,
+			FirstFreeblock:        firstFreeblock,
+			CellCount:             cellCount,
+			CellContentAreaOffset: cellContentAreaOffset,
+			FragmentedFreeBytes:   fragmentedFreeBytes,
+			RightMostPointer:      rightMostPointer,
+		},
+		CellPointers: cellPointers,
 	}, nil
 }
