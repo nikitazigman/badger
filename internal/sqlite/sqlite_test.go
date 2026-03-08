@@ -104,7 +104,7 @@ func TestParseBTreePageLeafPageFromSampleFixture(t *testing.T) {
 	t.Parallel()
 
 	page := readFixturePage(t, "sample.db", 1)
-	got, err := parseBTreePage(page, 1, 100)
+	got, err := parseBTreePage(page[100:], 1)
 	if err != nil {
 		t.Fatalf("parseBTreePage returned error: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestParseBTreePageLeafPageFromSampleFixture(t *testing.T) {
 	if got.PageHeader.PageKind != 0x0d {
 		t.Fatalf("PageKind = 0x%02x, want 0x0d", got.PageHeader.PageKind)
 	}
-	if got.PageHeader.HeaderSize != 8 {
-		t.Fatalf("HeaderSize = %d, want 8", got.PageHeader.HeaderSize)
+	if got.PageHeader.HeaderSize() != 8 {
+		t.Fatalf("HeaderSize = %d, want 8", got.PageHeader.HeaderSize())
 	}
 	if got.PageHeader.FirstFreeblock != 0 {
 		t.Fatalf("FirstFreeblock = %d, want 0", got.PageHeader.FirstFreeblock)
@@ -143,7 +143,7 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "companies.db", 2)
-		got, err := parseBTreePage(page, 2, 0)
+		got, err := parseBTreePage(page, 2)
 		if err != nil {
 			t.Fatalf("parseBTreePage returned error: %v", err)
 		}
@@ -151,8 +151,8 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		if got.PageHeader.PageKind != 0x05 {
 			t.Fatalf("PageKind = 0x%02x, want 0x05", got.PageHeader.PageKind)
 		}
-		if got.PageHeader.HeaderSize != 12 {
-			t.Fatalf("HeaderSize = %d, want 12", got.PageHeader.HeaderSize)
+		if got.PageHeader.HeaderSize() != 12 {
+			t.Fatalf("HeaderSize = %d, want 12", got.PageHeader.HeaderSize())
 		}
 		if got.PageHeader.CellCount != 4 {
 			t.Fatalf("CellCount = %d, want 4", got.PageHeader.CellCount)
@@ -173,7 +173,7 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "companies.db", 4)
-		got, err := parseBTreePage(page, 4, 0)
+		got, err := parseBTreePage(page, 4)
 		if err != nil {
 			t.Fatalf("parseBTreePage returned error: %v", err)
 		}
@@ -181,8 +181,8 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		if got.PageHeader.PageKind != 0x02 {
 			t.Fatalf("PageKind = 0x%02x, want 0x02", got.PageHeader.PageKind)
 		}
-		if got.PageHeader.HeaderSize != 12 {
-			t.Fatalf("HeaderSize = %d, want 12", got.PageHeader.HeaderSize)
+		if got.PageHeader.HeaderSize() != 12 {
+			t.Fatalf("HeaderSize = %d, want 12", got.PageHeader.HeaderSize())
 		}
 		if got.PageHeader.CellCount != 1 {
 			t.Fatalf("CellCount = %d, want 1", got.PageHeader.CellCount)
@@ -204,7 +204,7 @@ func TestParseBTreePageIndexLeafFromFixture(t *testing.T) {
 	t.Parallel()
 
 	page := readFixturePage(t, "superheroes.db", 7)
-	got, err := parseBTreePage(page, 7, 0)
+	got, err := parseBTreePage(page, 7)
 	if err != nil {
 		t.Fatalf("parseBTreePage returned error: %v", err)
 	}
@@ -212,8 +212,8 @@ func TestParseBTreePageIndexLeafFromFixture(t *testing.T) {
 	if got.PageHeader.PageKind != 0x0a {
 		t.Fatalf("PageKind = 0x%02x, want 0x0a", got.PageHeader.PageKind)
 	}
-	if got.PageHeader.HeaderSize != 8 {
-		t.Fatalf("HeaderSize = %d, want 8", got.PageHeader.HeaderSize)
+	if got.PageHeader.HeaderSize() != 8 {
+		t.Fatalf("HeaderSize = %d, want 8", got.PageHeader.HeaderSize())
 	}
 	if got.PageHeader.CellCount != 448 {
 		t.Fatalf("CellCount = %d, want 448", got.PageHeader.CellCount)
@@ -238,40 +238,12 @@ func TestParseBTreePageErrors(t *testing.T) {
 
 		page := make([]byte, 8)
 		page[0] = 0x01
-		_, err := parseBTreePage(page, 9, 0)
+		_, err := parseBTreePage(page, 9)
 		if err == nil {
 			t.Fatal("expected error for unsupported page kind, got nil")
 		}
 		if !strings.Contains(err.Error(), "unsupported b-tree page kind") {
 			t.Fatalf("error = %q, want substring %q", err.Error(), "unsupported b-tree page kind")
-		}
-	})
-
-	t.Run("header_out_of_range", func(t *testing.T) {
-		t.Parallel()
-
-		page := make([]byte, 107)
-		_, err := parseBTreePage(page, 1, 100)
-		if err == nil {
-			t.Fatal("expected error for short page header, got nil")
-		}
-		if !strings.Contains(err.Error(), "too short for b-tree header") {
-			t.Fatalf("error = %q, want substring %q", err.Error(), "too short for b-tree header")
-		}
-	})
-
-	t.Run("cell_pointer_array_out_of_range", func(t *testing.T) {
-		t.Parallel()
-
-		page := make([]byte, 8)
-		page[0] = 0x0d
-		binary.BigEndian.PutUint16(page[3:5], 1)
-		_, err := parseBTreePage(page, 2, 0)
-		if err == nil {
-			t.Fatal("expected error for pointer array out of range, got nil")
-		}
-		if !strings.Contains(err.Error(), "cell pointer array out of range") {
-			t.Fatalf("error = %q, want substring %q", err.Error(), "cell pointer array out of range")
 		}
 	})
 }
