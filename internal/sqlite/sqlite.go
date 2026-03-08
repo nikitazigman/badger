@@ -158,10 +158,14 @@ func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
 }
 
 type PageInspection struct {
-	PageNumber   uint32
-	DBHeader     *DBHeader
-	PageHeader   PageHeader
-	CellPointers []uint16
+	PageNumber         uint32
+	DBHeader           *DBHeader
+	PageHeader         PageHeader
+	CellPointers       []uint16
+	TableLeafCells     []TableLeafCell
+	TableInteriorCells []TableInteriorCell
+	IndexLeafCells     []IndexLeafCell
+	IndexInteriorCells []IndexInteriorCell
 }
 
 func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
@@ -170,37 +174,188 @@ func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
 		return nil, err
 	}
 
+	inspection, err := i.parseBTreePage(page, number)
+	if err != nil {
+		return nil, err
+	}
 	if number == 1 {
-		// first 100 bytes belong to the DB Header
-		page, err := parseBTreePage(page[100:], number)
-		if err != nil {
-			return nil, err
-		}
-		page.DBHeader = i.dbHeader
-		return page, nil
+		inspection.DBHeader = i.dbHeader
 	}
 
-	return parseBTreePage(page, number)
+	return inspection, nil
 }
 
-func parseBTreePage(page []byte, pageNumber uint32) (*PageInspection, error) {
-	pageHeader, err := parsePageHeader(page)
+func (i *Inspector) parseBTreePage(page []byte, pageNumber uint32) (*PageInspection, error) {
+	if i == nil || i.dbHeader == nil {
+		return nil, fmt.Errorf("database header is not loaded")
+	}
+
+	reservedBytes := i.dbHeader.ReservedBytesPerPage
+	if len(page) == 0 {
+		return nil, fmt.Errorf("page %d is empty", pageNumber)
+	}
+	if _, err := usablePageSize(page, reservedBytes); err != nil {
+		return nil, fmt.Errorf("page %d: %w", pageNumber, err)
+	}
+
+	headerOffset := 0
+	if pageNumber == 1 {
+		if len(page) < 100 {
+			return nil, fmt.Errorf("page 1 is truncated: expected at least 100 bytes, got %d", len(page))
+		}
+		headerOffset = 100
+	}
+	if headerOffset >= len(page) {
+		return nil, fmt.Errorf("page %d has invalid header offset %d", pageNumber, headerOffset)
+	}
+
+	pageHeader, err := parsePageHeader(page[headerOffset:])
 	if err != nil {
 		return nil, err
 	}
 
 	cellPointers := make([]uint16, 0, pageHeader.CellCount)
-	headerSize := uint16(pageHeader.HeaderSize())
+	headerSize := pageHeader.HeaderSize()
 	for idx := range pageHeader.CellCount {
-		ptrOffset := headerSize + idx*2
+		ptrOffset := headerOffset + headerSize + int(idx)*2
+		if ptrOffset+2 > len(page) {
+			return nil, fmt.Errorf("page %d cell pointer %d is truncated", pageNumber, idx)
+		}
 		cellPointer := binary.BigEndian.Uint16(page[ptrOffset : ptrOffset+2])
+		if int(cellPointer) >= len(page) {
+			return nil, fmt.Errorf("page %d cell pointer %d out of range: %d", pageNumber, idx, cellPointer)
+		}
 		cellPointers = append(cellPointers, cellPointer)
 	}
 
-	return &PageInspection{
+	inspection := &PageInspection{
 		PageNumber:   pageNumber,
 		PageHeader:   *pageHeader,
 		CellPointers: cellPointers,
+	}
+
+	switch pageHeader.PageKind {
+	case LeafTableBTreePage:
+		cells, err := parseCells(page, cellPointers, parseTableLeafCell)
+		if err != nil {
+			return nil, fmt.Errorf("page %d table leaf parse failed: %w", pageNumber, err)
+		}
+		inspection.TableLeafCells = cells
+	case InteriorTableBTreePage:
+		cells, err := parseCells(page, cellPointers, parseTableInteriorCell)
+		if err != nil {
+			return nil, fmt.Errorf("page %d table interior parse failed: %w", pageNumber, err)
+		}
+		inspection.TableInteriorCells = cells
+	case LeafIndexBTreePage:
+		cells, err := parseCells(page, cellPointers, parseIndexLeafCell)
+		if err != nil {
+			return nil, fmt.Errorf("page %d index leaf parse failed: %w", pageNumber, err)
+		}
+		inspection.IndexLeafCells = cells
+	case InteriorIndexBTreePage:
+		cells, err := parseCells(page, cellPointers, parseIndexInteriorCell)
+		if err != nil {
+			return nil, fmt.Errorf("page %d index interior parse failed: %w", pageNumber, err)
+		}
+		inspection.IndexInteriorCells = cells
+	}
+
+	return inspection, nil
+}
+
+func parseCells[T any](page []byte, cellPointers []uint16, parser func([]byte) (*T, error)) ([]T, error) {
+	cells := make([]T, 0, len(cellPointers))
+	for idx, ptr := range cellPointers {
+		cell, err := parser(page[ptr:])
+		if err != nil {
+			return nil, fmt.Errorf("cell %d parse failed: %w", idx, err)
+		}
+		cells = append(cells, *cell)
+	}
+	return cells, nil
+}
+
+type TableLeafCell struct {
+	PayloadSize   uint64
+	RowID         uint64
+	HeaderVarints int
+}
+
+func parseTableLeafCell(cell []byte) (*TableLeafCell, error) {
+	payloadSize, payloadVarintBytes, err := decodeVarint(cell)
+	if err != nil {
+		return nil, fmt.Errorf("table leaf payload size: %w", err)
+	}
+
+	rowID, rowIDVarintBytes, err := decodeVarint(cell[payloadVarintBytes:])
+	if err != nil {
+		return nil, fmt.Errorf("table leaf rowid: %w", err)
+	}
+
+	return &TableLeafCell{
+		PayloadSize:   payloadSize,
+		RowID:         rowID,
+		HeaderVarints: payloadVarintBytes + rowIDVarintBytes,
+	}, nil
+}
+
+type TableInteriorCell struct {
+	LeftChildPage uint32
+	RowID         uint64
+}
+
+func parseTableInteriorCell(cell []byte) (*TableInteriorCell, error) {
+	if len(cell) < 4 {
+		return nil, fmt.Errorf("table interior cell is truncated: expected at least 4 bytes, got %d", len(cell))
+	}
+
+	leftChildPage := binary.BigEndian.Uint32(cell[0:4])
+	rowID, _, err := decodeVarint(cell[4:])
+	if err != nil {
+		return nil, fmt.Errorf("table interior rowid: %w", err)
+	}
+
+	return &TableInteriorCell{
+		LeftChildPage: leftChildPage,
+		RowID:         rowID,
+	}, nil
+}
+
+type IndexLeafCell struct {
+	PayloadSize uint64
+}
+
+func parseIndexLeafCell(cell []byte) (*IndexLeafCell, error) {
+	payloadSize, _, err := decodeVarint(cell)
+	if err != nil {
+		return nil, fmt.Errorf("index leaf payload size: %w", err)
+	}
+
+	return &IndexLeafCell{
+		PayloadSize: payloadSize,
+	}, nil
+}
+
+type IndexInteriorCell struct {
+	LeftChildPage uint32
+	PayloadSize   uint64
+}
+
+func parseIndexInteriorCell(cell []byte) (*IndexInteriorCell, error) {
+	if len(cell) < 4 {
+		return nil, fmt.Errorf("index interior cell is truncated: expected at least 4 bytes, got %d", len(cell))
+	}
+
+	leftChildPage := binary.BigEndian.Uint32(cell[0:4])
+	payloadSize, _, err := decodeVarint(cell[4:])
+	if err != nil {
+		return nil, fmt.Errorf("index interior payload size: %w", err)
+	}
+
+	return &IndexInteriorCell{
+		LeftChildPage: leftChildPage,
+		PayloadSize:   payloadSize,
 	}, nil
 }
 
@@ -237,6 +392,10 @@ func (h *PageHeader) IsInterior() bool {
 }
 
 func parsePageHeader(header []byte) (*PageHeader, error) {
+	if len(header) < 8 {
+		return nil, fmt.Errorf("page header is truncated: expected at least 8 bytes, got %d", len(header))
+	}
+
 	pageHeader := &PageHeader{}
 	pageHeader.PageKind = PageKindType(header[0])
 	switch pageHeader.PageKind {
@@ -251,8 +410,76 @@ func parsePageHeader(header []byte) (*PageHeader, error) {
 	pageHeader.FragmentedFreeBytes = header[7]
 
 	if pageHeader.IsInterior() {
+		if len(header) < 12 {
+			return nil, fmt.Errorf("interior page header is truncated: expected at least 12 bytes, got %d", len(header))
+		}
 		value := binary.BigEndian.Uint32(header[8:12])
 		pageHeader.RightMostPointer = &value
 	}
 	return pageHeader, nil
+}
+
+func decodeVarint(buf []byte) (uint64, int, error) {
+	if len(buf) == 0 {
+		return 0, 0, fmt.Errorf("varint is truncated: expected at least 1 byte, got 0")
+	}
+
+	var value uint64
+	for idx := 0; idx < len(buf) && idx < 8; idx++ {
+		b := buf[idx]
+		value = (value << 7) | uint64(b&0x7f)
+		if b&0x80 == 0 {
+			return value, idx + 1, nil
+		}
+	}
+
+	if len(buf) < 9 {
+		return 0, 0, fmt.Errorf("varint is truncated: expected up to 9 bytes, got %d", len(buf))
+	}
+	value = (value << 8) | uint64(buf[8])
+	return value, 9, nil
+}
+
+func localPayloadSize(pageKind PageKindType, usableSize uint16, payloadSize uint64) (uint64, error) {
+	if usableSize <= 35 {
+		return 0, fmt.Errorf("usable page size %d is too small", usableSize)
+	}
+
+	u := uint64(usableSize)
+	m := ((u - 12) * 32 / 255) - 23
+	var x uint64
+
+	switch pageKind {
+	case LeafTableBTreePage:
+		x = u - 35
+	case LeafIndexBTreePage, InteriorIndexBTreePage:
+		x = ((u - 12) * 64 / 255) - 23
+	default:
+		return 0, fmt.Errorf("page kind 0x%02x does not support payload size calculation", pageKind)
+	}
+
+	if payloadSize <= x {
+		return payloadSize, nil
+	}
+	if u <= 4 {
+		return 0, fmt.Errorf("usable page size %d is invalid for overflow calculation", usableSize)
+	}
+
+	k := m + ((payloadSize - m) % (u - 4))
+	if k <= x {
+		return k, nil
+	}
+	return m, nil
+}
+
+func usablePageSize(page []byte, reservedBytes uint8) (uint16, error) {
+	if int(reservedBytes) >= len(page) {
+		return 0, fmt.Errorf("reserved bytes per page %d are invalid for page size %d", reservedBytes, len(page))
+	}
+
+	usable := len(page) - int(reservedBytes)
+	if usable > 65535 {
+		return 0, fmt.Errorf("usable page size %d exceeds uint16", usable)
+	}
+	return uint16(usable), nil
 }

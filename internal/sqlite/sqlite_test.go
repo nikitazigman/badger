@@ -104,7 +104,7 @@ func TestParseBTreePageLeafPageFromSampleFixture(t *testing.T) {
 	t.Parallel()
 
 	page := readFixturePage(t, "sample.db", 1)
-	got, err := parseBTreePage(page[100:], 1)
+	got, err := parseBTreePageForTest(page, 1)
 	if err != nil {
 		t.Fatalf("parseBTreePage returned error: %v", err)
 	}
@@ -134,6 +134,18 @@ func TestParseBTreePageLeafPageFromSampleFixture(t *testing.T) {
 	if !equalUint16Slice(got.CellPointers, wantPointers) {
 		t.Fatalf("CellPointers = %v, want %v", got.CellPointers, wantPointers)
 	}
+	if len(got.TableLeafCells) != int(got.PageHeader.CellCount) {
+		t.Fatalf("len(TableLeafCells) = %d, want %d", len(got.TableLeafCells), got.PageHeader.CellCount)
+	}
+	if got.TableLeafCells[0].RowID != 1 {
+		t.Fatalf("first RowID = %d, want 1", got.TableLeafCells[0].RowID)
+	}
+	if got.TableLeafCells[2].RowID != 3 {
+		t.Fatalf("last RowID = %d, want 3", got.TableLeafCells[2].RowID)
+	}
+	if len(got.TableInteriorCells) != 0 || len(got.IndexLeafCells) != 0 || len(got.IndexInteriorCells) != 0 {
+		t.Fatal("only TableLeafCells should be populated for leaf table pages")
+	}
 }
 
 func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
@@ -143,7 +155,7 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "companies.db", 2)
-		got, err := parseBTreePage(page, 2)
+		got, err := parseBTreePageForTest(page, 2)
 		if err != nil {
 			t.Fatalf("parseBTreePage returned error: %v", err)
 		}
@@ -167,13 +179,22 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		if !equalUint16Slice(got.CellPointers, wantPointers) {
 			t.Fatalf("CellPointers = %v, want %v", got.CellPointers, wantPointers)
 		}
+		if len(got.TableInteriorCells) != int(got.PageHeader.CellCount) {
+			t.Fatalf("len(TableInteriorCells) = %d, want %d", len(got.TableInteriorCells), got.PageHeader.CellCount)
+		}
+		if got.TableInteriorCells[0].RowID >= got.TableInteriorCells[len(got.TableInteriorCells)-1].RowID {
+			t.Fatalf("expected increasing rowids, got first=%d last=%d", got.TableInteriorCells[0].RowID, got.TableInteriorCells[len(got.TableInteriorCells)-1].RowID)
+		}
+		if len(got.TableLeafCells) != 0 || len(got.IndexLeafCells) != 0 || len(got.IndexInteriorCells) != 0 {
+			t.Fatal("only TableInteriorCells should be populated for interior table pages")
+		}
 	})
 
 	t.Run("index_interior_companies_page_4", func(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "companies.db", 4)
-		got, err := parseBTreePage(page, 4)
+		got, err := parseBTreePageForTest(page, 4)
 		if err != nil {
 			t.Fatalf("parseBTreePage returned error: %v", err)
 		}
@@ -197,6 +218,18 @@ func TestParseBTreePageInteriorKindsFromFixtures(t *testing.T) {
 		if !equalUint16Slice(got.CellPointers, wantPointers) {
 			t.Fatalf("CellPointers = %v, want %v", got.CellPointers, wantPointers)
 		}
+		if len(got.IndexInteriorCells) != int(got.PageHeader.CellCount) {
+			t.Fatalf("len(IndexInteriorCells) = %d, want %d", len(got.IndexInteriorCells), got.PageHeader.CellCount)
+		}
+		if got.IndexInteriorCells[0].LeftChildPage == 0 {
+			t.Fatal("expected non-zero LeftChildPage")
+		}
+		if got.IndexInteriorCells[0].PayloadSize == 0 {
+			t.Fatal("expected non-zero PayloadSize")
+		}
+		if len(got.TableLeafCells) != 0 || len(got.TableInteriorCells) != 0 || len(got.IndexLeafCells) != 0 {
+			t.Fatal("only IndexInteriorCells should be populated for interior index pages")
+		}
 	})
 }
 
@@ -204,7 +237,7 @@ func TestParseBTreePageIndexLeafFromFixture(t *testing.T) {
 	t.Parallel()
 
 	page := readFixturePage(t, "superheroes.db", 7)
-	got, err := parseBTreePage(page, 7)
+	got, err := parseBTreePageForTest(page, 7)
 	if err != nil {
 		t.Fatalf("parseBTreePage returned error: %v", err)
 	}
@@ -228,6 +261,15 @@ func TestParseBTreePageIndexLeafFromFixture(t *testing.T) {
 	if !equalUint16Slice(got.CellPointers[:5], wantPrefix) {
 		t.Fatalf("CellPointers prefix = %v, want %v", got.CellPointers[:5], wantPrefix)
 	}
+	if len(got.IndexLeafCells) != int(got.PageHeader.CellCount) {
+		t.Fatalf("len(IndexLeafCells) = %d, want %d", len(got.IndexLeafCells), got.PageHeader.CellCount)
+	}
+	if got.IndexLeafCells[0].PayloadSize == 0 || got.IndexLeafCells[len(got.IndexLeafCells)-1].PayloadSize == 0 {
+		t.Fatal("expected non-zero payload sizes for first and last index leaf cells")
+	}
+	if len(got.TableLeafCells) != 0 || len(got.TableInteriorCells) != 0 || len(got.IndexInteriorCells) != 0 {
+		t.Fatal("only IndexLeafCells should be populated for leaf index pages")
+	}
 }
 
 func TestParseBTreePageErrors(t *testing.T) {
@@ -238,12 +280,199 @@ func TestParseBTreePageErrors(t *testing.T) {
 
 		page := make([]byte, 8)
 		page[0] = 0x01
-		_, err := parseBTreePage(page, 9)
+		_, err := parseBTreePageForTest(page, 9)
 		if err == nil {
 			t.Fatal("expected error for unsupported page kind, got nil")
 		}
 		if !strings.Contains(err.Error(), "unsupported b-tree page kind") {
 			t.Fatalf("error = %q, want substring %q", err.Error(), "unsupported b-tree page kind")
+		}
+	})
+}
+
+func TestDecodeVarint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   []byte
+		want    uint64
+		wantN   int
+		wantErr string
+	}{
+		{
+			name:  "one_byte",
+			input: []byte{0x7f},
+			want:  127,
+			wantN: 1,
+		},
+		{
+			name:  "multi_byte",
+			input: []byte{0x81, 0x00},
+			want:  128,
+			wantN: 2,
+		},
+		{
+			name:  "nine_byte",
+			input: []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01},
+			want:  1,
+			wantN: 9,
+		},
+		{
+			name:    "truncated",
+			input:   []byte{0x81},
+			wantErr: "varint is truncated",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, n, err := decodeVarint(tc.input)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("decodeVarint returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("decodeVarint value = %d, want %d", got, tc.want)
+			}
+			if n != tc.wantN {
+				t.Fatalf("decodeVarint bytes = %d, want %d", n, tc.wantN)
+			}
+		})
+	}
+}
+
+func TestLocalPayloadSize(t *testing.T) {
+	t.Parallel()
+
+	t.Run("table_leaf_thresholds", func(t *testing.T) {
+		t.Parallel()
+
+		gotAtThreshold, err := localPayloadSize(LeafTableBTreePage, fixturePageSize, 4061)
+		if err != nil {
+			t.Fatalf("localPayloadSize returned error: %v", err)
+		}
+		if gotAtThreshold != 4061 {
+			t.Fatalf("localPayloadSize threshold = %d, want 4061", gotAtThreshold)
+		}
+
+		gotAboveThreshold, err := localPayloadSize(LeafTableBTreePage, fixturePageSize, 4062)
+		if err != nil {
+			t.Fatalf("localPayloadSize returned error: %v", err)
+		}
+		if gotAboveThreshold != 489 {
+			t.Fatalf("localPayloadSize above threshold = %d, want 489", gotAboveThreshold)
+		}
+	})
+
+	t.Run("index_leaf_thresholds", func(t *testing.T) {
+		t.Parallel()
+
+		gotAtThreshold, err := localPayloadSize(LeafIndexBTreePage, fixturePageSize, 1002)
+		if err != nil {
+			t.Fatalf("localPayloadSize returned error: %v", err)
+		}
+		if gotAtThreshold != 1002 {
+			t.Fatalf("localPayloadSize threshold = %d, want 1002", gotAtThreshold)
+		}
+
+		gotAboveThreshold, err := localPayloadSize(LeafIndexBTreePage, fixturePageSize, 1003)
+		if err != nil {
+			t.Fatalf("localPayloadSize returned error: %v", err)
+		}
+		if gotAboveThreshold != 489 {
+			t.Fatalf("localPayloadSize above threshold = %d, want 489", gotAboveThreshold)
+		}
+	})
+
+	t.Run("index_interior_thresholds", func(t *testing.T) {
+		t.Parallel()
+
+		gotAtThreshold, err := localPayloadSize(InteriorIndexBTreePage, fixturePageSize, 1002)
+		if err != nil {
+			t.Fatalf("localPayloadSize returned error: %v", err)
+		}
+		if gotAtThreshold != 1002 {
+			t.Fatalf("localPayloadSize threshold = %d, want 1002", gotAtThreshold)
+		}
+
+		gotAboveThreshold, err := localPayloadSize(InteriorIndexBTreePage, fixturePageSize, 1003)
+		if err != nil {
+			t.Fatalf("localPayloadSize returned error: %v", err)
+		}
+		if gotAboveThreshold != 489 {
+			t.Fatalf("localPayloadSize above threshold = %d, want 489", gotAboveThreshold)
+		}
+	})
+}
+
+func TestCellParsersFromFixtures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("table_leaf_0x0d", func(t *testing.T) {
+		t.Parallel()
+
+		page := readFixturePage(t, "sample.db", 1)
+		cell, err := parseTableLeafCell(page[3983:])
+		if err != nil {
+			t.Fatalf("parseTableLeafCell returned error: %v", err)
+		}
+		if cell.RowID != 1 {
+			t.Fatalf("RowID = %d, want 1", cell.RowID)
+		}
+		if cell.PayloadSize == 0 {
+			t.Fatal("expected non-zero payload size")
+		}
+	})
+
+	t.Run("table_interior_0x05", func(t *testing.T) {
+		t.Parallel()
+
+		page := readFixturePage(t, "companies.db", 2)
+		cell, err := parseTableInteriorCell(page[4089:])
+		if err != nil {
+			t.Fatalf("parseTableInteriorCell returned error: %v", err)
+		}
+		if cell.LeftChildPage == 0 || cell.RowID == 0 {
+			t.Fatalf("unexpected table interior cell: %+v", *cell)
+		}
+	})
+
+	t.Run("index_leaf_0x0a", func(t *testing.T) {
+		t.Parallel()
+
+		page := readFixturePage(t, "superheroes.db", 7)
+		cell, err := parseIndexLeafCell(page[4090:])
+		if err != nil {
+			t.Fatalf("parseIndexLeafCell returned error: %v", err)
+		}
+		if cell.PayloadSize == 0 {
+			t.Fatal("expected non-zero payload size")
+		}
+	})
+
+	t.Run("index_interior_0x02", func(t *testing.T) {
+		t.Parallel()
+
+		page := readFixturePage(t, "companies.db", 4)
+		cell, err := parseIndexInteriorCell(page[4078:])
+		if err != nil {
+			t.Fatalf("parseIndexInteriorCell returned error: %v", err)
+		}
+		if cell.LeftChildPage == 0 || cell.PayloadSize == 0 {
+			t.Fatalf("unexpected index interior cell: %+v", *cell)
 		}
 	})
 }
@@ -289,4 +518,13 @@ func equalUint16Slice(got []uint16, want []uint16) bool {
 		}
 	}
 	return true
+}
+
+func parseBTreePageForTest(page []byte, pageNumber uint32) (*PageInspection, error) {
+	inspector := &Inspector{
+		dbHeader: &DBHeader{
+			ReservedBytesPerPage: 0,
+		},
+	}
+	return inspector.parseBTreePage(page, pageNumber)
 }
