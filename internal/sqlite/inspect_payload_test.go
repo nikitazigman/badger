@@ -23,8 +23,8 @@ func TestInspectPageParsedPayloadFromFixtures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InspectPage returned error: %v", err)
 		}
-		if inspection.BTreePage.PageHeader.PageKind != LeafTableBTreePage {
-			t.Fatalf("PageKind = 0x%02x, want 0x0d", inspection.BTreePage.PageHeader.PageKind)
+		if inspection.BTreePage.PageHeader.PageKind.Value != LeafTableBTreePage {
+			t.Fatalf("PageKind = 0x%02x, want 0x0d", inspection.BTreePage.PageHeader.PageKind.Value)
 		}
 		if len(inspection.BTreePage.TableLeafCells) == 0 {
 			t.Fatal("expected at least one table leaf cell")
@@ -33,14 +33,17 @@ func TestInspectPageParsedPayloadFromFixtures(t *testing.T) {
 			if cell.ParsedPayload == nil {
 				t.Fatalf("cell %d ParsedPayload = nil, want non-nil", idx)
 			}
-			if cell.ParsedPayload.UsesOverflow {
-				t.Fatalf("cell %d UsesOverflow = true, want false for sample fixture", idx)
+			if cell.ParsedPayload.OverflowFirstPage != nil {
+				t.Fatalf("cell %d OverflowFirstPage != nil, want nil for sample fixture", idx)
 			}
 			if len(cell.ParsedPayload.SerialTypes) == 0 {
 				t.Fatalf("cell %d SerialTypes is empty", idx)
 			}
 			if len(cell.ParsedPayload.Columns) != len(cell.ParsedPayload.SerialTypes) {
 				t.Fatalf("cell %d len(Columns) = %d, want %d", idx, len(cell.ParsedPayload.Columns), len(cell.ParsedPayload.SerialTypes))
+			}
+			if cell.ParsedPayload.Meta.Size == 0 {
+				t.Fatalf("cell %d parsed payload meta size = 0", idx)
 			}
 		}
 	})
@@ -58,8 +61,8 @@ func TestInspectPageParsedPayloadFromFixtures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InspectPage(4) returned error: %v", err)
 		}
-		if interiorIndexPage.BTreePage.PageHeader.PageKind != InteriorIndexBTreePage {
-			t.Fatalf("page 4 kind = 0x%02x, want 0x02", interiorIndexPage.BTreePage.PageHeader.PageKind)
+		if interiorIndexPage.BTreePage.PageHeader.PageKind.Value != InteriorIndexBTreePage {
+			t.Fatalf("page 4 kind = 0x%02x, want 0x02", interiorIndexPage.BTreePage.PageHeader.PageKind.Value)
 		}
 		if len(interiorIndexPage.BTreePage.IndexInteriorCells) == 0 {
 			t.Fatal("expected at least one index interior cell on page 4")
@@ -82,8 +85,8 @@ func TestInspectPageParsedPayloadFromFixtures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InspectPage(7) returned error: %v", err)
 		}
-		if inspection.BTreePage.PageHeader.PageKind != LeafIndexBTreePage {
-			t.Fatalf("page 7 kind = 0x%02x, want 0x0a", inspection.BTreePage.PageHeader.PageKind)
+		if inspection.BTreePage.PageHeader.PageKind.Value != LeafIndexBTreePage {
+			t.Fatalf("page 7 kind = 0x%02x, want 0x0a", inspection.BTreePage.PageHeader.PageKind.Value)
 		}
 		if len(inspection.BTreePage.IndexLeafCells) == 0 {
 			t.Fatal("expected at least one index leaf cell")
@@ -94,6 +97,12 @@ func TestInspectPageParsedPayloadFromFixtures(t *testing.T) {
 		}
 		if len(first.ParsedPayload.Columns) != len(first.ParsedPayload.SerialTypes) {
 			t.Fatalf("len(Columns) = %d, want %d", len(first.ParsedPayload.Columns), len(first.ParsedPayload.SerialTypes))
+		}
+		if len(inspection.BTreePage.CellPointerArray.Pointers) == 0 {
+			t.Fatal("CellPointers is empty")
+		}
+		if inspection.BTreePage.CellPointerArray.Meta.Size == 0 {
+			t.Fatal("CellPointerArray.Meta.Size = 0")
 		}
 	})
 }
@@ -124,17 +133,35 @@ func TestInspectPageMarksOverflowCell(t *testing.T) {
 	if parsed == nil {
 		t.Fatal("ParsedPayload = nil, want non-nil")
 	}
-	if !parsed.UsesOverflow {
-		t.Fatal("UsesOverflow = false, want true")
-	}
 	if parsed.OverflowFirstPage == nil {
 		t.Fatal("OverflowFirstPage = nil, want non-nil")
 	}
-	if *parsed.OverflowFirstPage != 2 {
-		t.Fatalf("OverflowFirstPage = %d, want 2", *parsed.OverflowFirstPage)
+	if parsed.OverflowFirstPage.Value != 2 {
+		t.Fatalf("OverflowFirstPage = %d, want 2", parsed.OverflowFirstPage.Value)
 	}
 	if len(parsed.Columns) != 0 {
 		t.Fatalf("len(Columns) = %d, want 0 for overflow-only marker payload", len(parsed.Columns))
+	}
+}
+
+func TestInspectDatabaseMetadata(t *testing.T) {
+	t.Parallel()
+
+	inspector, err := Open(fixturePath("sample.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer inspector.Close()
+
+	metadata, err := inspector.InspectDatabaseMetadata()
+	if err != nil {
+		t.Fatalf("InspectDatabaseMetadata returned error: %v", err)
+	}
+	if metadata.DBHeader.HeaderString != "SQLite format 3\x00" {
+		t.Fatalf("HeaderString = %q, want %q", metadata.DBHeader.HeaderString, "SQLite format 3\x00")
+	}
+	if metadata.DBHeader.PageSize != 4096 {
+		t.Fatalf("PageSize = %d, want 4096", metadata.DBHeader.PageSize)
 	}
 }
 
