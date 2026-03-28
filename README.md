@@ -12,7 +12,7 @@ The current CLI exposes parser-oriented commands. The intended product direction
 This project was inspired by the SQLite course on CodeCrafters, and it is an evolution of my original code written for that course.
 
 ## Requirements
-- Go `1.25.0`
+- Go `1.26.1`
 
 ## Quick Start
 ```bash
