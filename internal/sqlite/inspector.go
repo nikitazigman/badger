@@ -76,7 +76,7 @@ func (i *Inspector) readPage(number uint32) ([]byte, error) {
 type MetadataInspection struct {
 	Path          string
 	DBHeader      DBHeader
-	SchemaRecords []GenericRecord
+	SchemaRecords []Row
 }
 
 func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
@@ -94,7 +94,7 @@ func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
 		return nil, fmt.Errorf("page 1 is page kind 0x%02x, want leaf table page", page.BTreePage.PageHeader.PageKind.Value)
 	}
 
-	schemaRecords := make([]GenericRecord, 0, len(page.BTreePage.TableLeafCells))
+	schemaRecords := make([]Row, 0, len(page.BTreePage.TableLeafCells))
 	for idx, cell := range page.BTreePage.TableLeafCells {
 		if cell.ParsedPayload == nil {
 			return nil, fmt.Errorf("sqlite_schema cell %d on page 1 payload is missing", idx)
@@ -104,7 +104,7 @@ func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sqlite_schema cell %d on page 1: %w", idx, err)
 		}
-		schemaRecords = append(schemaRecords, *record)
+		schemaRecords = append(schemaRecords, record)
 	}
 
 	return &MetadataInspection{
