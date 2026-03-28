@@ -13,16 +13,16 @@ func TestParseRecordPayload(t *testing.T) {
 		t.Parallel()
 
 		payload := []byte{0x05, 0x00, 0x01, 0x0f, 0x0e, 0x7f, 0x41, 0xff}
-		got, err := parseRecordPayload(payload)
+		got, err := parseRecordPayload(payload, 1, fixturePageSize, 200)
 		if err != nil {
 			t.Fatalf("parseRecordPayload returned error: %v", err)
 		}
 
-		if got.HeaderSize != 5 {
-			t.Fatalf("HeaderSize = %d, want 5", got.HeaderSize)
+		if got.HeaderSize.Value != 5 {
+			t.Fatalf("HeaderSize = %d, want 5", got.HeaderSize.Value)
 		}
 		wantSerialTypes := []uint64{0, 1, 15, 14}
-		if !reflect.DeepEqual(got.SerialTypes, wantSerialTypes) {
+		if !reflect.DeepEqual(serialTypeValues(got.SerialTypes), wantSerialTypes) {
 			t.Fatalf("SerialTypes = %v, want %v", got.SerialTypes, wantSerialTypes)
 		}
 		if len(got.Columns) != len(wantSerialTypes) {
@@ -34,18 +34,27 @@ func TestParseRecordPayload(t *testing.T) {
 		if got.Columns[1].Value != int64(127) {
 			t.Fatalf("column 1 value = %#v, want %d", got.Columns[1].Value, int64(127))
 		}
-		if !reflect.DeepEqual(got.Columns[2].Value, []byte{0x41}) {
-			t.Fatalf("column 2 value = %#v, want []byte{0x41}", got.Columns[2].Value)
+		if got.Columns[2].Value != "A" {
+			t.Fatalf("column 2 value = %#v, want %q", got.Columns[2].Value, "A")
 		}
 		if !reflect.DeepEqual(got.Columns[3].Value, []byte{0xff}) {
 			t.Fatalf("column 3 value = %#v, want []byte{0xff}", got.Columns[3].Value)
+		}
+		if storageClassForSerialType(got.Columns[2].SerialType) != "text" {
+			t.Fatalf("column 2 storage class = %q, want %q", storageClassForSerialType(got.Columns[2].SerialType), "text")
+		}
+		if storageClassForSerialType(got.Columns[3].SerialType) != "blob" {
+			t.Fatalf("column 3 storage class = %q, want %q", storageClassForSerialType(got.Columns[3].SerialType), "blob")
+		}
+		if got.Meta.StartOffset != 200 || got.Meta.EndOffset() != 208 {
+			t.Fatalf("record meta = %+v, want offsets 200..208", got.Meta)
 		}
 	})
 
 	t.Run("serial_types_8_and_9_constants", func(t *testing.T) {
 		t.Parallel()
 
-		got, err := parseRecordPayload([]byte{0x03, 0x08, 0x09})
+		got, err := parseRecordPayload([]byte{0x03, 0x08, 0x09}, 1, fixturePageSize, 300)
 		if err != nil {
 			t.Fatalf("parseRecordPayload returned error: %v", err)
 		}
@@ -101,7 +110,7 @@ func TestParseRecordPayloadErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := parseRecordPayload(tc.payload)
+			_, err := parseRecordPayload(tc.payload, 1, fixturePageSize, 0)
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
 			}
@@ -110,4 +119,12 @@ func TestParseRecordPayloadErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func serialTypeValues(entries []VarintField) []uint64 {
+	values := make([]uint64, 0, len(entries))
+	for _, entry := range entries {
+		values = append(values, entry.Value)
+	}
+	return values
 }

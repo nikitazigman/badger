@@ -5,21 +5,37 @@ import (
 	"fmt"
 )
 
+type payloadDecode struct {
+	LocalPayload      []byte
+	PayloadOffset     int
+	LocalPayloadBytes uint64
+	OverflowFirstPage *uint32
+	OverflowOffset    int
+}
+
 func cellLocalPayload(cell []byte, pageKind PageKindType, payloadSize uint64, usablePageBytes uint16) ([]byte, *uint32, error) {
-	localBytes, err := localPayloadBytes(pageKind, payloadSize, usablePageBytes)
+	result, err := decodeCellLocalPayload(cell, pageKind, payloadSize, usablePageBytes)
 	if err != nil {
 		return nil, nil, err
+	}
+	return result.LocalPayload, result.OverflowFirstPage, nil
+}
+
+func decodeCellLocalPayload(cell []byte, pageKind PageKindType, payloadSize uint64, usablePageBytes uint16) (*payloadDecode, error) {
+	localBytes, err := localPayloadBytes(pageKind, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	payloadOffset, err := payloadStartOffset(cell, pageKind)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if payloadOffset > len(cell) {
-		return nil, nil, fmt.Errorf("payload start offset %d exceeds cell bytes %d", payloadOffset, len(cell))
+		return nil, fmt.Errorf("payload start offset %d exceeds cell bytes %d", payloadOffset, len(cell))
 	}
 	if uint64(payloadOffset)+localBytes > uint64(len(cell)) {
-		return nil, nil, fmt.Errorf("cell payload is truncated: need %d local payload bytes, have %d", localBytes, uint64(len(cell))-uint64(payloadOffset))
+		return nil, fmt.Errorf("cell payload is truncated: need %d local payload bytes, have %d", localBytes, uint64(len(cell))-uint64(payloadOffset))
 	}
 
 	start := payloadOffset
@@ -29,13 +45,23 @@ func cellLocalPayload(cell []byte, pageKind PageKindType, payloadSize uint64, us
 
 	if localBytes < payloadSize {
 		if end+4 > len(cell) {
-			return nil, nil, fmt.Errorf("overflow pointer is truncated: need 4 bytes, have %d", len(cell)-end)
+			return nil, fmt.Errorf("overflow pointer is truncated: need 4 bytes, have %d", len(cell)-end)
 		}
 		firstOverflow := binary.BigEndian.Uint32(cell[end : end+4])
-		return payload, &firstOverflow, nil
+		return &payloadDecode{
+			LocalPayload:      payload,
+			PayloadOffset:     payloadOffset,
+			LocalPayloadBytes: localBytes,
+			OverflowFirstPage: &firstOverflow,
+			OverflowOffset:    end,
+		}, nil
 	}
 
-	return payload, nil, nil
+	return &payloadDecode{
+		LocalPayload:      payload,
+		PayloadOffset:     payloadOffset,
+		LocalPayloadBytes: localBytes,
+	}, nil
 }
 
 func localPayloadBytes(pageKind PageKindType, payloadSize uint64, usablePageBytes uint16) (uint64, error) {

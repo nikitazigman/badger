@@ -4,22 +4,24 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"unicode/utf8"
 )
 
 type RecordPayload struct {
-	HeaderSize        uint64
-	SerialTypes       []uint64
+	Meta              Meta
+	HeaderSize        VarintField
+	SerialTypes       []VarintField
 	Columns           []RecordColumn
-	UsesOverflow      bool
-	OverflowFirstPage *uint32
+	OverflowFirstPage *Uint32Field
 }
 
 type RecordColumn struct {
+	Meta       Meta
 	SerialType uint64
 	Value      any
 }
 
-func parseRecordPayload(payload []byte) (*RecordPayload, error) {
+func parseRecordPayload(payload []byte, pageNumber uint32, pageSize uint32, startOffset int) (*RecordPayload, error) {
 	headerSize, headerSizeVarintBytes, err := decodeVarint(payload)
 	if err != nil {
 		return nil, fmt.Errorf("record header size: %w", err)
@@ -33,13 +35,17 @@ func parseRecordPayload(payload []byte) (*RecordPayload, error) {
 
 	headerEnd := int(headerSize)
 	headerIdx := headerSizeVarintBytes
-	serialTypes := make([]uint64, 0, 8)
+	serialTypes := make([]VarintField, 0, 8)
 	for headerIdx < headerEnd {
+		entryStart := headerIdx
 		serialType, varintBytes, err := decodeVarint(payload[headerIdx:headerEnd])
 		if err != nil {
 			return nil, fmt.Errorf("record serial type at header offset %d: %w", headerIdx, err)
 		}
-		serialTypes = append(serialTypes, serialType)
+		serialTypes = append(serialTypes, VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, startOffset+entryStart, varintBytes),
+			Value: serialType,
+		})
 		headerIdx += varintBytes
 	}
 	if headerIdx != headerEnd {
@@ -49,7 +55,7 @@ func parseRecordPayload(payload []byte) (*RecordPayload, error) {
 	bodyIdx := headerEnd
 	columns := make([]RecordColumn, 0, len(serialTypes))
 	for idx, serialType := range serialTypes {
-		valueLen, err := serialTypeByteLength(serialType)
+		valueLen, err := serialTypeByteLength(serialType.Value)
 		if err != nil {
 			return nil, fmt.Errorf("record serial type %d at column %d: %w", serialType, idx, err)
 		}
@@ -57,19 +63,24 @@ func parseRecordPayload(payload []byte) (*RecordPayload, error) {
 			return nil, fmt.Errorf("record body is truncated at column %d: need %d bytes, have %d", idx, valueLen, len(payload)-bodyIdx)
 		}
 
-		value, err := decodeRecordValue(serialType, payload[bodyIdx:bodyIdx+valueLen])
+		value, err := decodeRecordValue(serialType.Value, payload[bodyIdx:bodyIdx+valueLen])
 		if err != nil {
 			return nil, fmt.Errorf("record value decode failed at column %d: %w", idx, err)
 		}
 		columns = append(columns, RecordColumn{
-			SerialType: serialType,
+			Meta:       metaFromPage(pageNumber, pageSize, startOffset+bodyIdx, valueLen),
+			SerialType: serialType.Value,
 			Value:      value,
 		})
 		bodyIdx += valueLen
 	}
 
 	return &RecordPayload{
-		HeaderSize:  headerSize,
+		Meta: metaFromPage(pageNumber, pageSize, startOffset, len(payload)),
+		HeaderSize: VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, startOffset, headerSizeVarintBytes),
+			Value: headerSize,
+		},
 		SerialTypes: serialTypes,
 		Columns:     columns,
 	}, nil
@@ -103,6 +114,26 @@ func serialTypeByteLength(serialType uint64) (int, error) {
 	}
 }
 
+func storageClassForSerialType(serialType uint64) string {
+	switch serialType {
+	case 0:
+		return "null"
+	case 1, 2, 3, 4, 5, 6:
+		return "int"
+	case 7:
+		return "float"
+	case 8:
+		return "const-0"
+	case 9:
+		return "const-1"
+	default:
+		if serialType%2 == 1 {
+			return "text"
+		}
+		return "blob"
+	}
+}
+
 func decodeRecordValue(serialType uint64, raw []byte) (any, error) {
 	switch serialType {
 	case 0:
@@ -121,8 +152,16 @@ func decodeRecordValue(serialType uint64, raw []byte) (any, error) {
 	case 10, 11:
 		return nil, fmt.Errorf("reserved serial type")
 	default:
+		if serialType%2 == 1 {
+			if utf8.Valid(raw) {
+				return string(raw), nil
+			}
+		}
 		buf := make([]byte, len(raw))
 		copy(buf, raw)
+		if serialType%2 == 1 {
+			return string(buf), nil
+		}
 		return buf, nil
 	}
 }

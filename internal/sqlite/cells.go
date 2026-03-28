@@ -5,10 +5,15 @@ import (
 	"fmt"
 )
 
-func parseCells[T any](page []byte, cellPointers []uint16, parser func([]byte) (*T, error)) ([]T, error) {
-	cells := make([]T, 0, len(cellPointers))
-	for idx, ptr := range cellPointers {
-		cell, err := parser(page[ptr:])
+type CellPointerArray struct {
+	Meta     Meta
+	Pointers []Uint16Field
+}
+
+func parseCells[T any](page []byte, pointers []Uint16Field, parser func([]byte, uint16) (*T, error)) ([]T, error) {
+	cells := make([]T, 0, len(pointers))
+	for idx, ptr := range pointers {
+		cell, err := parser(page[ptr.Value:], ptr.Value)
 		if err != nil {
 			return nil, fmt.Errorf("cell %d parse failed: %w", idx, err)
 		}
@@ -18,121 +23,173 @@ func parseCells[T any](page []byte, cellPointers []uint16, parser func([]byte) (
 }
 
 type TableLeafCell struct {
-	PayloadSize   uint64
-	RowID         uint64
+	Meta          Meta
+	PayloadSize   VarintField
+	RowID         VarintField
 	ParsedPayload *RecordPayload
 }
 
-func parseTableLeafCell(cell []byte, usablePageBytes uint16) (*TableLeafCell, error) {
+func parseTableLeafCell(cell []byte, usablePageBytes uint16, pageNumber uint32, pageSize uint32, cellOffset uint16) (*TableLeafCell, error) {
 	payloadSize, payloadVarintBytes, err := decodeVarint(cell)
 	if err != nil {
 		return nil, fmt.Errorf("table leaf payload size: %w", err)
 	}
 
-	rowID, _, err := decodeVarint(cell[payloadVarintBytes:])
+	rowID, rowIDVarintBytes, err := decodeVarint(cell[payloadVarintBytes:])
 	if err != nil {
 		return nil, fmt.Errorf("table leaf rowid: %w", err)
 	}
 
-	parsedPayload, err := parseCellRecordPayload(cell, LeafTableBTreePage, payloadSize, usablePageBytes)
+	payloadInfo, err := decodeCellLocalPayload(cell, LeafTableBTreePage, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("payload extraction: %w", err)
+	}
+
+	parsedPayload, err := parseCellRecordPayload(payloadInfo, pageNumber, pageSize, int(cellOffset))
 	if err != nil {
 		return nil, fmt.Errorf("table leaf parsed payload: %w", err)
 	}
 
+	cellSize := int(payloadInfo.OverflowOffset + 4)
+	if payloadInfo.OverflowFirstPage == nil {
+		cellSize = payloadInfo.PayloadOffset + len(payloadInfo.LocalPayload)
+	}
 	return &TableLeafCell{
-		PayloadSize:   payloadSize,
-		RowID:         rowID,
+		Meta: metaFromPage(pageNumber, pageSize, int(cellOffset), cellSize),
+		PayloadSize: VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset), payloadVarintBytes),
+			Value: payloadSize,
+		},
+		RowID: VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset)+payloadVarintBytes, rowIDVarintBytes),
+			Value: rowID,
+		},
 		ParsedPayload: parsedPayload,
 	}, nil
 }
 
 type TableInteriorCell struct {
-	LeftChildPage uint32
-	RowID         uint64
+	Meta          Meta
+	LeftChildPage Uint32Field
+	RowID         VarintField
 }
 
-func parseTableInteriorCell(cell []byte) (*TableInteriorCell, error) {
+func parseTableInteriorCell(cell []byte, pageNumber uint32, pageSize uint32, cellOffset uint16) (*TableInteriorCell, error) {
 	if len(cell) < 4 {
 		return nil, fmt.Errorf("table interior cell is truncated: expected at least 4 bytes, got %d", len(cell))
 	}
 
 	leftChildPage := binary.BigEndian.Uint32(cell[0:4])
-	rowID, _, err := decodeVarint(cell[4:])
+	rowID, rowIDBytes, err := decodeVarint(cell[4:])
 	if err != nil {
 		return nil, fmt.Errorf("table interior rowid: %w", err)
 	}
 
 	return &TableInteriorCell{
-		LeftChildPage: leftChildPage,
-		RowID:         rowID,
+		Meta: metaFromPage(pageNumber, pageSize, int(cellOffset), 4+rowIDBytes),
+		LeftChildPage: Uint32Field{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset), 4),
+			Value: leftChildPage,
+		},
+		RowID: VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset)+4, rowIDBytes),
+			Value: rowID,
+		},
 	}, nil
 }
 
 type IndexLeafCell struct {
-	PayloadSize   uint64
+	Meta          Meta
+	PayloadSize   VarintField
 	ParsedPayload *RecordPayload
 }
 
-func parseIndexLeafCell(cell []byte, usablePageBytes uint16) (*IndexLeafCell, error) {
-	payloadSize, _, err := decodeVarint(cell)
+func parseIndexLeafCell(cell []byte, usablePageBytes uint16, pageNumber uint32, pageSize uint32, cellOffset uint16) (*IndexLeafCell, error) {
+	payloadSize, payloadVarintBytes, err := decodeVarint(cell)
 	if err != nil {
 		return nil, fmt.Errorf("index leaf payload size: %w", err)
 	}
 
-	parsedPayload, err := parseCellRecordPayload(cell, LeafIndexBTreePage, payloadSize, usablePageBytes)
+	payloadInfo, err := decodeCellLocalPayload(cell, LeafIndexBTreePage, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("payload extraction: %w", err)
+	}
+
+	parsedPayload, err := parseCellRecordPayload(payloadInfo, pageNumber, pageSize, int(cellOffset))
 	if err != nil {
 		return nil, fmt.Errorf("index leaf parsed payload: %w", err)
 	}
-
+	cellSize := int(payloadInfo.OverflowOffset + 4)
+	if payloadInfo.OverflowFirstPage == nil {
+		cellSize = payloadInfo.PayloadOffset + len(payloadInfo.LocalPayload)
+	}
 	return &IndexLeafCell{
-		PayloadSize:   payloadSize,
+		Meta: metaFromPage(pageNumber, pageSize, int(cellOffset), cellSize),
+		PayloadSize: VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset), payloadVarintBytes),
+			Value: payloadSize,
+		},
 		ParsedPayload: parsedPayload,
 	}, nil
 }
 
 type IndexInteriorCell struct {
-	LeftChildPage uint32
-	PayloadSize   uint64
+	Meta          Meta
+	LeftChildPage Uint32Field
+	PayloadSize   VarintField
 	ParsedPayload *RecordPayload
 }
 
-func parseIndexInteriorCell(cell []byte, usablePageBytes uint16) (*IndexInteriorCell, error) {
+func parseIndexInteriorCell(cell []byte, usablePageBytes uint16, pageNumber uint32, pageSize uint32, cellOffset uint16) (*IndexInteriorCell, error) {
 	if len(cell) < 4 {
 		return nil, fmt.Errorf("index interior cell is truncated: expected at least 4 bytes, got %d", len(cell))
 	}
 
 	leftChildPage := binary.BigEndian.Uint32(cell[0:4])
-	payloadSize, _, err := decodeVarint(cell[4:])
+	payloadSize, payloadVarintBytes, err := decodeVarint(cell[4:])
 	if err != nil {
 		return nil, fmt.Errorf("index interior payload size: %w", err)
 	}
 
-	parsedPayload, err := parseCellRecordPayload(cell, InteriorIndexBTreePage, payloadSize, usablePageBytes)
-	if err != nil {
-		return nil, fmt.Errorf("index interior parsed payload: %w", err)
-	}
-
-	return &IndexInteriorCell{
-		LeftChildPage: leftChildPage,
-		PayloadSize:   payloadSize,
-		ParsedPayload: parsedPayload,
-	}, nil
-}
-
-func parseCellRecordPayload(cell []byte, pageKind PageKindType, payloadSize uint64, usablePageBytes uint16) (*RecordPayload, error) {
-	localPayload, overflowFirstPage, err := cellLocalPayload(cell, pageKind, payloadSize, usablePageBytes)
+	payloadInfo, err := decodeCellLocalPayload(cell, InteriorIndexBTreePage, payloadSize, usablePageBytes)
 	if err != nil {
 		return nil, fmt.Errorf("payload extraction: %w", err)
 	}
 
-	if overflowFirstPage != nil {
+	parsedPayload, err := parseCellRecordPayload(payloadInfo, pageNumber, pageSize, int(cellOffset))
+	if err != nil {
+		return nil, fmt.Errorf("index interior parsed payload: %w", err)
+	}
+	cellSize := int(payloadInfo.OverflowOffset + 4)
+	if payloadInfo.OverflowFirstPage == nil {
+		cellSize = payloadInfo.PayloadOffset + len(payloadInfo.LocalPayload)
+	}
+	return &IndexInteriorCell{
+		Meta: metaFromPage(pageNumber, pageSize, int(cellOffset), cellSize),
+		LeftChildPage: Uint32Field{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset), 4),
+			Value: leftChildPage,
+		},
+		PayloadSize: VarintField{
+			Meta:  metaFromPage(pageNumber, pageSize, int(cellOffset)+4, payloadVarintBytes),
+			Value: payloadSize,
+		},
+		ParsedPayload: parsedPayload,
+	}, nil
+}
+
+func parseCellRecordPayload(payloadInfo *payloadDecode, pageNumber uint32, pageSize uint32, cellOffset int) (*RecordPayload, error) {
+	if payloadInfo.OverflowFirstPage != nil {
 		return &RecordPayload{
-			UsesOverflow:      true,
-			OverflowFirstPage: overflowFirstPage,
+			Meta: metaFromPage(pageNumber, pageSize, cellOffset+payloadInfo.PayloadOffset, len(payloadInfo.LocalPayload)),
+			OverflowFirstPage: &Uint32Field{
+				Meta:  metaFromPage(pageNumber, pageSize, cellOffset+payloadInfo.OverflowOffset, 4),
+				Value: *payloadInfo.OverflowFirstPage,
+			},
 		}, nil
 	}
 
-	parsedPayload, err := parseRecordPayload(localPayload)
+	parsedPayload, err := parseRecordPayload(payloadInfo.LocalPayload, pageNumber, pageSize, cellOffset+payloadInfo.PayloadOffset)
 	if err != nil {
 		return nil, fmt.Errorf("record decode: %w", err)
 	}

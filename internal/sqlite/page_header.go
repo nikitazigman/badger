@@ -15,12 +15,13 @@ const (
 )
 
 type PageHeader struct {
-	PageKind              PageKindType
-	FirstFreeblock        uint16
-	CellCount             uint16
-	CellContentAreaOffset uint16
-	FragmentedFreeBytes   uint8
-	RightMostPointer      *uint32
+	Meta                  Meta
+	PageKind              PageKindField
+	FirstFreeblock        Uint16Field
+	CellCount             Uint16Field
+	CellContentAreaOffset Uint16Field
+	FragmentedFreeBytes   Uint8Field
+	RightMostPointer      *Uint32Field
 }
 
 func (h *PageHeader) HeaderSize() int {
@@ -31,36 +32,54 @@ func (h *PageHeader) HeaderSize() int {
 }
 
 func (h *PageHeader) IsInterior() bool {
-	if h.PageKind == InteriorIndexBTreePage || h.PageKind == InteriorTableBTreePage {
+	if h.PageKind.Value == InteriorIndexBTreePage || h.PageKind.Value == InteriorTableBTreePage {
 		return true
 	}
 	return false
 }
 
-func parsePageHeader(header []byte) (*PageHeader, error) {
+func parsePageHeader(header []byte, pageNumber uint32, pageSize uint32, headerOffset int) (*PageHeader, error) {
 	if len(header) < 8 {
 		return nil, fmt.Errorf("page header is truncated: expected at least 8 bytes, got %d", len(header))
 	}
 
 	pageHeader := &PageHeader{}
-	pageHeader.PageKind = PageKindType(header[0])
-	switch pageHeader.PageKind {
+	pageHeader.PageKind = PageKindField{
+		Meta:  metaFromPage(pageNumber, pageSize, headerOffset, 1),
+		Value: PageKindType(header[0]),
+	}
+	switch pageHeader.PageKind.Value {
 	case InteriorIndexBTreePage, InteriorTableBTreePage, LeafIndexBTreePage, LeafTableBTreePage:
 	default:
-		return nil, fmt.Errorf("page has unsupported b-tree page kind 0x%02x", pageHeader.PageKind)
+		return nil, fmt.Errorf("page has unsupported b-tree page kind 0x%02x", pageHeader.PageKind.Value)
 	}
 
-	pageHeader.FirstFreeblock = binary.BigEndian.Uint16(header[1:3])
-	pageHeader.CellCount = binary.BigEndian.Uint16(header[3:5])
-	pageHeader.CellContentAreaOffset = binary.BigEndian.Uint16(header[5:7])
-	pageHeader.FragmentedFreeBytes = header[7]
+	pageHeader.FirstFreeblock = Uint16Field{
+		Meta:  metaFromPage(pageNumber, pageSize, headerOffset+1, 2),
+		Value: binary.BigEndian.Uint16(header[1:3]),
+	}
+	pageHeader.CellCount = Uint16Field{
+		Meta:  metaFromPage(pageNumber, pageSize, headerOffset+3, 2),
+		Value: binary.BigEndian.Uint16(header[3:5]),
+	}
+	pageHeader.CellContentAreaOffset = Uint16Field{
+		Meta:  metaFromPage(pageNumber, pageSize, headerOffset+5, 2),
+		Value: binary.BigEndian.Uint16(header[5:7]),
+	}
+	pageHeader.FragmentedFreeBytes = Uint8Field{
+		Meta:  metaFromPage(pageNumber, pageSize, headerOffset+7, 1),
+		Value: header[7],
+	}
 
 	if pageHeader.IsInterior() {
 		if len(header) < 12 {
 			return nil, fmt.Errorf("interior page header is truncated: expected at least 12 bytes, got %d", len(header))
 		}
-		value := binary.BigEndian.Uint32(header[8:12])
-		pageHeader.RightMostPointer = &value
+		pageHeader.RightMostPointer = &Uint32Field{
+			Meta:  metaFromPage(pageNumber, pageSize, headerOffset+8, 4),
+			Value: binary.BigEndian.Uint32(header[8:12]),
+		}
 	}
+	pageHeader.Meta = metaFromPage(pageNumber, pageSize, headerOffset, pageHeader.HeaderSize())
 	return pageHeader, nil
 }
