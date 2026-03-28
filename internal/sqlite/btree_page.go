@@ -18,7 +18,8 @@ func parseBTreePage(page []byte, pageNumber uint32, reservedBytesPerPage uint8) 
 	if len(page) == 0 {
 		return nil, fmt.Errorf("page %d is empty", pageNumber)
 	}
-	if _, err := usablePageSize(page, reservedBytesPerPage); err != nil {
+	usablePageBytes, err := usablePageSize(page, reservedBytesPerPage)
+	if err != nil {
 		return nil, fmt.Errorf("page %d: %w", pageNumber, err)
 	}
 
@@ -59,7 +60,9 @@ func parseBTreePage(page []byte, pageNumber uint32, reservedBytesPerPage uint8) 
 
 	switch pageHeader.PageKind {
 	case LeafTableBTreePage:
-		cells, err := parseCells(page, cellPointers, parseTableLeafCell)
+		cells, err := parseCells(page, cellPointers, func(cell []byte) (*TableLeafCell, error) {
+			return parseTableLeafCell(cell, usablePageBytes)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("page %d table leaf parse failed: %w", pageNumber, err)
 		}
@@ -71,13 +74,17 @@ func parseBTreePage(page []byte, pageNumber uint32, reservedBytesPerPage uint8) 
 		}
 		inspection.TableInteriorCells = cells
 	case LeafIndexBTreePage:
-		cells, err := parseCells(page, cellPointers, parseIndexLeafCell)
+		cells, err := parseCells(page, cellPointers, func(cell []byte) (*IndexLeafCell, error) {
+			return parseIndexLeafCell(cell, usablePageBytes)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("page %d index leaf parse failed: %w", pageNumber, err)
 		}
 		inspection.IndexLeafCells = cells
 	case InteriorIndexBTreePage:
-		cells, err := parseCells(page, cellPointers, parseIndexInteriorCell)
+		cells, err := parseCells(page, cellPointers, func(cell []byte) (*IndexInteriorCell, error) {
+			return parseIndexInteriorCell(cell, usablePageBytes)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("page %d index interior parse failed: %w", pageNumber, err)
 		}
