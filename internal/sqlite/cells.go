@@ -20,24 +20,29 @@ func parseCells[T any](page []byte, cellPointers []uint16, parser func([]byte) (
 type TableLeafCell struct {
 	PayloadSize   uint64
 	RowID         uint64
-	HeaderVarints int
+	ParsedPayload *RecordPayload
 }
 
-func parseTableLeafCell(cell []byte) (*TableLeafCell, error) {
+func parseTableLeafCell(cell []byte, usablePageBytes uint16) (*TableLeafCell, error) {
 	payloadSize, payloadVarintBytes, err := decodeVarint(cell)
 	if err != nil {
 		return nil, fmt.Errorf("table leaf payload size: %w", err)
 	}
 
-	rowID, rowIDVarintBytes, err := decodeVarint(cell[payloadVarintBytes:])
+	rowID, _, err := decodeVarint(cell[payloadVarintBytes:])
 	if err != nil {
 		return nil, fmt.Errorf("table leaf rowid: %w", err)
+	}
+
+	parsedPayload, err := parseCellRecordPayload(cell, LeafTableBTreePage, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("table leaf parsed payload: %w", err)
 	}
 
 	return &TableLeafCell{
 		PayloadSize:   payloadSize,
 		RowID:         rowID,
-		HeaderVarints: payloadVarintBytes + rowIDVarintBytes,
+		ParsedPayload: parsedPayload,
 	}, nil
 }
 
@@ -64,26 +69,34 @@ func parseTableInteriorCell(cell []byte) (*TableInteriorCell, error) {
 }
 
 type IndexLeafCell struct {
-	PayloadSize uint64
+	PayloadSize   uint64
+	ParsedPayload *RecordPayload
 }
 
-func parseIndexLeafCell(cell []byte) (*IndexLeafCell, error) {
+func parseIndexLeafCell(cell []byte, usablePageBytes uint16) (*IndexLeafCell, error) {
 	payloadSize, _, err := decodeVarint(cell)
 	if err != nil {
 		return nil, fmt.Errorf("index leaf payload size: %w", err)
 	}
 
+	parsedPayload, err := parseCellRecordPayload(cell, LeafIndexBTreePage, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("index leaf parsed payload: %w", err)
+	}
+
 	return &IndexLeafCell{
-		PayloadSize: payloadSize,
+		PayloadSize:   payloadSize,
+		ParsedPayload: parsedPayload,
 	}, nil
 }
 
 type IndexInteriorCell struct {
 	LeftChildPage uint32
 	PayloadSize   uint64
+	ParsedPayload *RecordPayload
 }
 
-func parseIndexInteriorCell(cell []byte) (*IndexInteriorCell, error) {
+func parseIndexInteriorCell(cell []byte, usablePageBytes uint16) (*IndexInteriorCell, error) {
 	if len(cell) < 4 {
 		return nil, fmt.Errorf("index interior cell is truncated: expected at least 4 bytes, got %d", len(cell))
 	}
@@ -94,8 +107,34 @@ func parseIndexInteriorCell(cell []byte) (*IndexInteriorCell, error) {
 		return nil, fmt.Errorf("index interior payload size: %w", err)
 	}
 
+	parsedPayload, err := parseCellRecordPayload(cell, InteriorIndexBTreePage, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("index interior parsed payload: %w", err)
+	}
+
 	return &IndexInteriorCell{
 		LeftChildPage: leftChildPage,
 		PayloadSize:   payloadSize,
+		ParsedPayload: parsedPayload,
 	}, nil
+}
+
+func parseCellRecordPayload(cell []byte, pageKind PageKindType, payloadSize uint64, usablePageBytes uint16) (*RecordPayload, error) {
+	localPayload, overflowFirstPage, err := cellLocalPayload(cell, pageKind, payloadSize, usablePageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("payload extraction: %w", err)
+	}
+
+	if overflowFirstPage != nil {
+		return &RecordPayload{
+			UsesOverflow:      true,
+			OverflowFirstPage: overflowFirstPage,
+		}, nil
+	}
+
+	parsedPayload, err := parseRecordPayload(localPayload)
+	if err != nil {
+		return nil, fmt.Errorf("record decode: %w", err)
+	}
+	return parsedPayload, nil
 }

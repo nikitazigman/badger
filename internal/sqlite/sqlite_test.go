@@ -361,7 +361,7 @@ func TestCellParsersFromFixtures(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "sample.db", 1)
-		cell, err := parseTableLeafCell(page[3983:])
+		cell, err := parseTableLeafCell(page[3983:], fixturePageSize)
 		if err != nil {
 			t.Fatalf("parseTableLeafCell returned error: %v", err)
 		}
@@ -390,7 +390,7 @@ func TestCellParsersFromFixtures(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "superheroes.db", 7)
-		cell, err := parseIndexLeafCell(page[4090:])
+		cell, err := parseIndexLeafCell(page[4090:], fixturePageSize)
 		if err != nil {
 			t.Fatalf("parseIndexLeafCell returned error: %v", err)
 		}
@@ -403,7 +403,7 @@ func TestCellParsersFromFixtures(t *testing.T) {
 		t.Parallel()
 
 		page := readFixturePage(t, "companies.db", 4)
-		cell, err := parseIndexInteriorCell(page[4078:])
+		cell, err := parseIndexInteriorCell(page[4078:], fixturePageSize)
 		if err != nil {
 			t.Fatalf("parseIndexInteriorCell returned error: %v", err)
 		}

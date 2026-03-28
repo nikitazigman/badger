@@ -100,6 +100,7 @@ func (i *Inspector) InspectPage(number uint32) (*PageInspection, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	inspection := &PageInspection{
 		PageNumber: number,
 		BTreePage:  *btreePage,
