@@ -2,11 +2,9 @@ package sqlite
 
 import "fmt"
 
-type GenericRecord struct {
-	Row map[string]any
-}
+type Row map[string]any
 
-func ParseRecord(record *RecordPayload, definition *SchemaDefinition) (*GenericRecord, error) {
+func ParseRecord(record *RecordPayload, definition *SchemaDefinition) (Row, error) {
 	if record == nil {
 		return nil, fmt.Errorf("record payload is nil")
 	}
@@ -17,16 +15,14 @@ func ParseRecord(record *RecordPayload, definition *SchemaDefinition) (*GenericR
 		return nil, fmt.Errorf("schema definition is nil")
 	}
 
-	result := &GenericRecord{
-		Row: make(map[string]any, len(record.Columns)),
-	}
+	result := make(Row, len(record.Columns))
 
 	for idx, column := range record.Columns {
 		name := fmt.Sprintf("__extra_%d", idx)
 		if idx < len(definition.Fields) {
 			name = definition.Fields[idx].Name
 		}
-		result.Row[name] = column.Value
+		result[name] = column.Value
 	}
 
 	return result, nil

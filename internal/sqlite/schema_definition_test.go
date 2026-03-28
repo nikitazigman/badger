@@ -103,11 +103,11 @@ func TestParseRecordWithSchema(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseRecord returned error: %v", err)
 		}
-		if len(record.Row) != 5 {
-			t.Fatalf("len(Row) = %d, want 5", len(record.Row))
+		if len(record) != 5 {
+			t.Fatalf("len(record) = %d, want 5", len(record))
 		}
 		for _, name := range []string{"type", "name", "tbl_name", "rootpage", "sql"} {
-			if _, ok := record.Row[name]; !ok {
+			if _, ok := record[name]; !ok {
 				t.Fatalf("expected field %q to exist", name)
 			}
 		}
@@ -143,11 +143,11 @@ func TestParseRecordWithSchema(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseRecord returned error: %v", err)
 		}
-		if len(record.Row) != 3 {
-			t.Fatalf("len(Row) = %d, want 3", len(record.Row))
+		if len(record) != 3 {
+			t.Fatalf("len(record) = %d, want 3", len(record))
 		}
 		for _, name := range []string{"id", "name", "color"} {
-			if _, ok := record.Row[name]; !ok {
+			if _, ok := record[name]; !ok {
 				t.Fatalf("expected field %q to exist", name)
 			}
 		}
@@ -183,13 +183,13 @@ func TestParseRecordWithSchema(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseRecord returned error: %v", err)
 		}
-		if len(record.Row) < 2 {
-			t.Fatalf("len(Row) = %d, want at least 2", len(record.Row))
+		if len(record) < 2 {
+			t.Fatalf("len(record) = %d, want at least 2", len(record))
 		}
-		if _, ok := record.Row["country"]; !ok {
+		if _, ok := record["country"]; !ok {
 			t.Fatalf("expected field %q to exist", "country")
 		}
-		if _, ok := record.Row["__extra_1"]; !ok {
+		if _, ok := record["__extra_1"]; !ok {
 			t.Fatalf("expected extra field %q to exist", "__extra_1")
 		}
 	})
@@ -211,27 +211,27 @@ func inspectMetadataFixture(t *testing.T, name string) *MetadataInspection {
 	return metadata
 }
 
-func requireSchemaRecord(t *testing.T, records []GenericRecord, name string) GenericRecord {
+func requireSchemaRecord(t *testing.T, records []Row, name string) Row {
 	t.Helper()
 
 	for _, record := range records {
-		gotName, ok := record.Row["name"].(string)
+		gotName, ok := record["name"].(string)
 		if !ok {
-			t.Fatalf("name = %T, want string", record.Row["name"])
+			t.Fatalf("name = %T, want string", record["name"])
 		}
 		if gotName == name {
 			return record
 		}
 	}
 	t.Fatalf("schema record %q not found", name)
-	return GenericRecord{}
+	return nil
 }
 
-func requireSchemaSQL(t *testing.T, records []GenericRecord, name string) string {
+func requireSchemaSQL(t *testing.T, records []Row, name string) string {
 	t.Helper()
 
 	record := requireSchemaRecord(t, records, name)
-	sqlValue, ok := record.Row["sql"]
+	sqlValue, ok := record["sql"]
 	if !ok {
 		t.Fatalf("sql field missing for %q", name)
 	}
@@ -242,13 +242,13 @@ func requireSchemaSQL(t *testing.T, records []GenericRecord, name string) string
 	return sql
 }
 
-func requireSchemaRootPage(t *testing.T, records []GenericRecord, name string) uint32 {
+func requireSchemaRootPage(t *testing.T, records []Row, name string) uint32 {
 	t.Helper()
 
 	record := requireSchemaRecord(t, records, name)
-	value, ok := record.Row["rootpage"].(int64)
+	value, ok := record["rootpage"].(int64)
 	if !ok {
-		t.Fatalf("rootpage = %T, want int64", record.Row["rootpage"])
+		t.Fatalf("rootpage = %T, want int64", record["rootpage"])
 	}
 	return uint32(value)
 }

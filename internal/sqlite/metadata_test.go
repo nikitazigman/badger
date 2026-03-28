@@ -55,34 +55,34 @@ func TestInspectDatabaseMetadataIncludesSchemaRecords(t *testing.T) {
 	})
 }
 
-func assertSchemaRecord(t *testing.T, got GenericRecord, wantType string, wantName string, wantTableName string) {
+func assertSchemaRecord(t *testing.T, got Row, wantType string, wantName string, wantTableName string) {
 	t.Helper()
 
-	recordType, ok := got.Row["type"].(string)
+	recordType, ok := got["type"].(string)
 	if !ok {
-		t.Fatalf("type = %T, want string", got.Row["type"])
+		t.Fatalf("type = %T, want string", got["type"])
 	}
 	if recordType != wantType {
 		t.Fatalf("type = %q, want %q", recordType, wantType)
 	}
 
-	name, ok := got.Row["name"].(string)
+	name, ok := got["name"].(string)
 	if !ok {
-		t.Fatalf("name = %T, want string", got.Row["name"])
+		t.Fatalf("name = %T, want string", got["name"])
 	}
 	if name != wantName {
 		t.Fatalf("name = %q, want %q", name, wantName)
 	}
 
-	tableName, ok := got.Row["tbl_name"].(string)
+	tableName, ok := got["tbl_name"].(string)
 	if !ok {
-		t.Fatalf("tbl_name = %T, want string", got.Row["tbl_name"])
+		t.Fatalf("tbl_name = %T, want string", got["tbl_name"])
 	}
 	if tableName != wantTableName {
 		t.Fatalf("tbl_name = %q, want %q", tableName, wantTableName)
 	}
 
-	sqlValue, exists := got.Row["sql"]
+	sqlValue, exists := got["sql"]
 	if !exists {
 		t.Fatal(`sql field missing`)
 	}
