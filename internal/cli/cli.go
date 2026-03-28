@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/nikitazigman/badger/internal/sqlite"
+	"github.com/nikitazigman/badger/internal/tui"
 )
 
 type ExitCode uint
@@ -23,6 +24,7 @@ type Command string
 const (
 	InspectCommand Command = "inspect"
 	PageCommand    Command = "page"
+	TUICommand     Command = "tui"
 	HelpCommand    Command = "help"
 )
 
@@ -78,6 +80,19 @@ func Run(args []string, out io.Writer, errOut io.Writer) ExitCode {
 
 		writeResult(out, "Page", dto)
 		return ExitSuccess
+	case TUICommand:
+		path, err := parseTUIArgs(args)
+		if err != nil {
+			writeUsageError(errOut, err.Error())
+			return ExitUsageError
+		}
+
+		if err := tui.Run(path, out); err != nil {
+			writeRuntimeError(errOut, "tui failed for %q: %v", path, err)
+			return ExitError
+		}
+
+		return ExitSuccess
 	case HelpCommand:
 		writeUsage(out)
 		return ExitSuccess
@@ -125,6 +140,17 @@ func parsePageArgs(args []string) (string, uint32, error) {
 	return path, uint32(page), nil
 }
 
+func parseTUIArgs(args []string) (string, error) {
+	if len(args) < 2 {
+		return "", errors.New("tui requires <file.db>")
+	}
+	if len(args) > 2 {
+		return "", fmt.Errorf("tui accepts exactly 1 argument, got %d", len(args)-1)
+	}
+
+	return args[1], nil
+}
+
 func writeResult(out io.Writer, label string, value any) {
 	fmt.Fprintf(out, "Badger %s Result\n", label)
 	fmt.Fprintf(out, "%s\n", renderValue(value))
@@ -160,5 +186,6 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  badger inspect <file.db>")
 	fmt.Fprintln(w, "  badger page <file.db> <N>")
+	fmt.Fprintln(w, "  badger tui <file.db>")
 	fmt.Fprintln(w, "  badger help")
 }
