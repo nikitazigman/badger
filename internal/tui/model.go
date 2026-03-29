@@ -42,20 +42,21 @@ type contentTarget struct {
 }
 
 type model struct {
-	inspector     *sqlite.Inspector
-	db            databaseViewModel
-	navItems      []navItem
-	selectedIndex int
-	explorerIndex int
-	active        contentTarget
-	currentPage   *sqlite.PageInspection
-	pageRows      []pageRowViewModel
-	focusedPane   pane
-	width         int
-	height        int
-	status        string
-	loading       bool
-	err           error
+	inspector       *sqlite.Inspector
+	db              databaseViewModel
+	navItems        []navItem
+	selectedIndex   int
+	explorerIndex   int
+	inspectorScroll int
+	active          contentTarget
+	currentPage     *sqlite.PageInspection
+	pageRows        []pageRowViewModel
+	focusedPane     pane
+	width           int
+	height          int
+	status          string
+	loading         bool
+	err             error
 }
 
 func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) (model, error) {
@@ -93,6 +94,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentPage = msg.page
 		m.pageRows = buildPageRows(msg.page)
 		m.explorerIndex = 0
+		m.inspectorScroll = 0
 		m.loading = false
 		m.status = fmt.Sprintf("opened page %d", msg.page.PageNumber)
 		return m, nil
@@ -136,6 +138,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSelection(-1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveExplorerSelection(-1)
+		} else if m.focusedPane == inspectorPane {
+			m.scrollInspector(-1, 1)
 		}
 		return m, nil
 	case "down", "j":
@@ -143,17 +147,36 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSelection(1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveExplorerSelection(1)
+		} else if m.focusedPane == inspectorPane {
+			m.scrollInspector(1, 1)
+		}
+		return m, nil
+	case "pgup":
+		if m.focusedPane == inspectorPane {
+			m.scrollInspector(-1, 8)
+		}
+		return m, nil
+	case "pgdown":
+		if m.focusedPane == inspectorPane {
+			m.scrollInspector(1, 8)
+		}
+		return m, nil
+	case "home":
+		if m.focusedPane == inspectorPane {
+			m.inspectorScroll = 0
 		}
 		return m, nil
 	case "esc":
 		if m.active.kind == navPage && m.focusedPane == explorerPane && m.explorerIndex > 0 {
 			m.explorerIndex = 0
+			m.inspectorScroll = 0
 			m.status = "returned to page summary"
 			return m, nil
 		}
 		m.active = contentTarget{kind: navOverview}
 		m.currentPage = nil
 		m.pageRows = nil
+		m.inspectorScroll = 0
 		m.status = "returned to overview"
 		return m, nil
 	}
@@ -170,6 +193,7 @@ func (m *model) moveSelection(delta int) {
 		next = len(m.navItems) - 1
 	}
 	m.selectedIndex = next
+	m.inspectorScroll = 0
 }
 
 func (m *model) selectFirstKind(kind navKind) {
@@ -193,6 +217,17 @@ func (m *model) moveExplorerSelection(delta int) {
 		next = len(m.pageRows) - 1
 	}
 	m.explorerIndex = next
+	m.inspectorScroll = 0
+}
+
+func (m *model) scrollInspector(direction int, amount int) {
+	if amount < 1 {
+		amount = 1
+	}
+	m.inspectorScroll += direction * amount
+	if m.inspectorScroll < 0 {
+		m.inspectorScroll = 0
+	}
 }
 
 func (m model) openSelected() (tea.Model, tea.Cmd) {
@@ -207,11 +242,13 @@ func (m model) openSelected() (tea.Model, tea.Cmd) {
 		m.status = "overview"
 		m.currentPage = nil
 		m.pageRows = nil
+		m.inspectorScroll = 0
 		return m, nil
 	case navDBHeader:
 		m.status = "database header"
 		m.currentPage = nil
 		m.pageRows = nil
+		m.inspectorScroll = 0
 		return m, nil
 	case navTable, navIndex:
 		if item.schema != nil {
@@ -220,11 +257,13 @@ func (m model) openSelected() (tea.Model, tea.Cmd) {
 		}
 		m.currentPage = nil
 		m.pageRows = nil
+		m.inspectorScroll = 0
 		return m, nil
 	case navPage:
 		m.active.pageNumber = item.pageNumber
 		m.explorerIndex = 0
 		m.pageRows = nil
+		m.inspectorScroll = 0
 		m.loading = true
 		m.status = fmt.Sprintf("loading page %d", item.pageNumber)
 		return m, loadPageCmd(m.inspector, item.pageNumber)
@@ -521,7 +560,7 @@ func (m model) viewInspector(width int, height int) string {
 	item := m.selectedItem()
 	if m.active.kind == navPage {
 		if content := m.viewPageInspector(width); content != "" {
-			return fitVertical(wrapLines(strings.Split(content, "\n"), width), height)
+			return m.renderInspectorViewport(strings.Split(content, "\n"), width, height)
 		}
 	}
 
@@ -598,7 +637,7 @@ func (m model) viewInspector(width int, height int) string {
 		lines = append(lines, "", errorStyle.Render(m.err.Error()))
 	}
 
-	return fitVertical(wrapLines(lines, width), height)
+	return m.renderInspectorViewport(lines, width, height)
 }
 
 func (m model) viewPageInspector(width int) string {
@@ -669,6 +708,67 @@ func paneStyle(focused bool, width int, height int) lipgloss.Style {
 		Height(height)
 }
 
+func (m model) renderInspectorViewport(lines []string, width int, height int) string {
+	contentWidth := width - 2
+	if contentWidth < 8 {
+		contentWidth = width
+	}
+
+	wrapped := wrapInspectorLines(lines, contentWidth)
+	maxScroll := max(0, len(wrapped)-height)
+	scroll := clamp(m.inspectorScroll, 0, maxScroll)
+
+	visible := wrapped
+	if len(visible) > height {
+		visible = visible[scroll:]
+	}
+	if len(visible) > height {
+		visible = visible[:height]
+	}
+	if len(visible) < height {
+		padding := make([]string, height-len(visible))
+		visible = append(visible, padding...)
+	}
+
+	if contentWidth == width || maxScroll == 0 {
+		return strings.Join(visible, "\n")
+	}
+
+	return renderScrollbar(visible, contentWidth, height, scroll, maxScroll)
+}
+
+func renderScrollbar(lines []string, contentWidth int, height int, scroll int, maxScroll int) string {
+	if height <= 0 {
+		return ""
+	}
+
+	track := make([]string, height)
+	for idx := range track {
+		track[idx] = scrollbarTrackStyle.Render("│")
+	}
+
+	thumbStart := 0
+	thumbSize := height
+	if maxScroll > 0 {
+		thumbSize = max(1, height*height/(height+maxScroll))
+		if thumbSize > height {
+			thumbSize = height
+		}
+		thumbStart = (scroll * (height - thumbSize)) / maxScroll
+	}
+
+	for idx := 0; idx < thumbSize && thumbStart+idx < height; idx++ {
+		track[thumbStart+idx] = scrollbarThumbStyle.Render("█")
+	}
+
+	out := make([]string, 0, height)
+	for idx := 0; idx < height; idx++ {
+		padded := lipgloss.NewStyle().Width(contentWidth).Render(lines[idx])
+		out = append(out, padded+" "+track[idx])
+	}
+	return strings.Join(out, "\n")
+}
+
 type visiblePageRow struct {
 	index int
 	pageRowViewModel
@@ -721,6 +821,8 @@ var (
 	selectedNavItemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
 	mutedStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	errorStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	scrollbarTrackStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
 
 func buildNavItems(db databaseViewModel) []navItem {
@@ -794,6 +896,32 @@ func wrapLines(lines []string, width int) []string {
 			continue
 		}
 		out = append(out, lipgloss.NewStyle().Width(width).Render(line))
+	}
+	return out
+}
+
+func wrapInspectorLines(lines []string, width int) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			out = append(out, "")
+			continue
+		}
+		if strings.Contains(line, "\x1b[") {
+			out = append(out, lipgloss.NewStyle().Width(width).Render(line))
+			continue
+		}
+
+		runes := []rune(line)
+		for len(runes) > width && width > 0 {
+			out = append(out, string(runes[:width]))
+			runes = runes[width:]
+		}
+		if len(runes) == 0 {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, string(runes))
 	}
 	return out
 }
