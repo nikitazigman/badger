@@ -25,6 +25,20 @@ This project started from the [CodeCrafters](https://codecrafters.io/) [Build yo
 
 ## Quick Start
 
+Install with Go:
+
+```bash
+go install github.com/nikitazigman/badger/cmd/badger@latest
+```
+
+Make sure your Go binary directory is on your `PATH`. You can check it with:
+
+```bash
+go env GOPATH
+```
+
+By default, Go installs binaries into `$(go env GOPATH)/bin`.
+
 Build the binary:
 
 ```bash
