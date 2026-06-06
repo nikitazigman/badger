@@ -1,12 +1,21 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
-	"github.com/nikitazigman/badger/internal/cli"
+	"github.com/nikitazigman/badger/internal/tui"
 )
 
 func main() {
-	exitCode := cli.Run(os.Args[1:], os.Stdout, os.Stderr)
-	os.Exit(int(exitCode))
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: badger <file.db>")
+		os.Exit(2)
+	}
+
+	path := os.Args[1]
+	if err := tui.Run(path, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to open TUI for %q: %v\n", path, err)
+		os.Exit(1)
+	}
 }

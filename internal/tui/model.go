@@ -294,7 +294,7 @@ func (m model) openRelativePage(delta int) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.width < 60 || m.height < 12 {
-		return "terminal too small for badger tui"
+		return "terminal too small for badger"
 	}
 
 	navWidth := clamp(m.width/4, 24, 34)
