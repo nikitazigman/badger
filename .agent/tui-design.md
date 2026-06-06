@@ -718,7 +718,7 @@ The MVP should keep transitions simple and predictable.
 - Selecting a cell should immediately show both cell header data and record data in the inspector.
 
 ### Transition: App Open -> Overview
-1. User runs `badger tui file.db`.
+1. User runs `badger file.db`.
 2. App loads database metadata and schema summaries.
 3. Explorer opens in `Overview`.
 4. Inspector shows overview metadata.

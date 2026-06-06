@@ -42,7 +42,7 @@ That means the product should favor:
 ## Suggested MVP Definition
 The first usable version should support:
 
-- Opening a SQLite file from the CLI.
+- Opening a SQLite file directly into the TUI.
 - Showing database-level metadata:
   - page size
   - page count
@@ -121,7 +121,7 @@ The MVP should instead focus on showing parsed page blocks and allowing drill-do
 User runs:
 
 ```bash
-badger tui path/to/file.db
+badger path/to/file.db
 ```
 
 ### 2. Land On Database Overview
@@ -286,7 +286,7 @@ To support the UI well, the underlying parser layer should expose:
 
 ### Remaining Product Questions
 14. Is read-only inspection enough for the foreseeable roadmap, or do you already expect editing features later?
-15. Do you want command-line shortcuts like `badger tui file.db --page 5` in the first milestone?
+15. Do you want startup shortcuts like `badger file.db --page 5` in a later milestone?
 
 ### Remaining Rendering Questions
 16. No major rendering questions remain for the MVP.
