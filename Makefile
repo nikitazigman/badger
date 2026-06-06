@@ -3,7 +3,7 @@
 .PHONY: help build run test
 
 BINARY := bin/badger
-MAIN := ./cmd/main.go
+MAIN := ./cmd/badger
 
 help: ## Show available make commands
 	@echo "Available commands:"
