@@ -1,7 +1,7 @@
 # Ticket 04 — Section-jump keys (`1`/`2`/`3`) & `esc`-clear (remainder)
 
 > Feature: **Filter Pages by Table or Index** (`feature/filter_by_table`)
-> Status: **📝 Drafted — depends on [Ticket 03](03-filter-state.md) (✅ done, `93c761b`).**
+> Status: **✅ Done — see [results/04-key-bindings.md](../results/04-key-bindings.md).** Depends on [Ticket 03](03-filter-state.md) (✅ done, `93c761b`).
 > Context: [context.md](../context.md) · [codebase-map.md](../codebase-map.md) · [feature-notes.md](../feature-notes.md) · [design.md](../design.md)
 
 ---
@@ -9,9 +9,9 @@
 ## Short description
 
 The **remainder** of the key bindings after [Ticket 03](03-filter-state.md) shipped the
-filtration experience (`f` apply, `F` clear, `[`/`]` filtered paging). This ticket adds the
-lazygit-style numbered section jumps from `design.md` §3 that were intentionally deferred,
-plus `esc` as a second clear-filter binding:
+filtration experience (`f` apply, `F` clear). This ticket adds the lazygit-style numbered
+section jumps from `design.md` §3 that were intentionally deferred, plus `esc` as a second
+clear-filter binding:
 
 - `1` → jump selection to the first `MAIN` row (Overview).
 - `2` → jump selection to the first `B-TREES` row.
@@ -23,16 +23,23 @@ the current section (MAIN / B-TREES / PAGES) and `1`/`2`/`3` move between them. 
 arrow navigation predictable inside long lists (e.g. thousands of pages) and makes the
 section jumps load-bearing rather than convenience-only.
 
-These are `handleKey` additions plus a small change to `moveSelection` over the nav structure
-Ticket 03 already builds. No state, parsing, or filter-rendering changes beyond the footer
-hint strings.
+The section jumps are made **discoverable** by numbering the nav-pane section headers
+themselves — `[1] MAIN` / `[2] B-TREES` / `[3] PAGES` — so the footer no longer has to spell
+them out. Two changes landed during implementation review (see _Decisions_ below): the jump
+numbers moved onto the headers, and the `[`/`]` prev/next-page binding shipped in Ticket 03
+was **removed** (paging a filtered set is now "jump to `PAGES`, use arrows").
+
+These are `handleKey` additions plus a small change to `moveSelection` and `viewNavigation`
+over the nav structure Ticket 03 already builds. No state, parsing, or filter-rendering
+changes beyond the footer hint strings and section-header labels.
 
 ---
 
 ## Decisions confirmed in discussion
 
-These two points are where `design.md` §3 collided with behaviour Ticket 03 already shipped;
-both were resolved in discussion and **supersede the design table** where they differ.
+These points are where `design.md` §3 collided with behaviour Ticket 03 already shipped, or
+where implementation review changed direction; all were resolved in discussion and
+**supersede the design table** where they differ.
 
 - **`1`/`2`/`3` are select-only and *replace* `g`/`h`/`p`.** The numbered jumps move the nav
   cursor **without opening** the item (matching today's `p`); `enter` opens. The pre-existing
@@ -49,6 +56,17 @@ both were resolved in discussion and **supersede the design table** where they d
   last row of the current section instead of spilling into the adjacent one. Crossing
   between MAIN, B-TREES and PAGES is done exclusively with the numbered jumps. This is a
   deliberate change to today's free-roaming arrow behaviour, agreed in discussion.
+- **Jump numbers live on the section headers, not the footer.** The nav-pane section
+  headers render as `[1] MAIN` / `[2] B-TREES` / `[3] PAGES` (via a `sectionLabel` helper),
+  which is where the design wireframes (§2, §4) already showed them. With the numbers inline
+  on the headers, the verbose `1 main · 2 b-trees · 3 pages` footer tokens are redundant and
+  were dropped — keeping the footer short. _Decided during implementation review._
+- **`[`/`]` prev/next-page is removed.** Ticket 03's `[`/`]` filtered-paging binding is
+  withdrawn: a user pages through a filtered set by jumping to `PAGES` (`3`) and using the
+  section-confined arrows. The now-unreachable `openRelativePage` → `openPageNumber` →
+  `stepWithin` chain and its test (`TestFilteredPagingClampsAtEnds`) were deleted with it.
+  `filteredPages()` (still used by rendering) is untouched. _Decided during implementation
+  review; this reverses part of Ticket 03._
 
 ---
 
@@ -56,22 +74,25 @@ both were resolved in discussion and **supersede the design table** where they d
 
 In scope:
 1. **Keys (`handleKey`)** — add `1`/`2`/`3` select-only section jumps; remove `g`/`h`/`p`;
-   make `esc` clear an active filter before its existing branches.
+   remove `[`/`]`; make `esc` clear an active filter before its existing branches.
 2. **Section-confined arrows** — make `moveSelection` (model.go:320) clamp `↑`/`↓` to the
    current section's bounds instead of the whole list.
 3. **B-TREES jump helper** — `2` must land on the first `B-TREES` row, which is the first
    `navTable`, or the first `navIndex` when the database has no tables.
-4. **Footer hint strings** — update `navKeys` / `filterKeys` (model.go:487) to advertise
-   `1 main · 2 b-trees · 3 pages` and drop the removed `g`/`h`/`p` hints.
-5. **Doc reconciliation** — update `design.md` §3 (and the wireframe footers in §4) so the
+4. **Numbered section headers** — render headers as `[1] MAIN` / `[2] B-TREES` / `[3] PAGES`
+   via a `sectionLabel` helper in `viewNavigation`.
+5. **Footer hint strings** — update `navKeys` / `filterKeys` (model.go:487): drop the removed
+   `g`/`h`/`p` and `[`/`]` hints; the section numbers live on the headers, not the footer.
+6. **Dead-code removal** — delete the now-unreachable `openRelativePage` / `openPageNumber` /
+   `stepWithin` chain and its test, freed up by removing `[`/`]`.
+7. **Doc reconciliation** — update `design.md` §3 (and the wireframe footers in §4) so the
    key table matches what ships: numbered jumps in place of `g`/`h`, `esc` clears filter,
-   and a note that arrows are section-confined.
+   arrows section-confined, `[`/`]` row removed.
 
 Out of scope:
 - Any change to filter state, nav rebuild, or rendering from Ticket 03 (`applyFilter`,
-  `clearFilter`, `buildNavItems`, markers, footer token — all reused as-is).
+  `clearFilter`, `buildNavItems`, markers, footer token, `filteredPages` — all reused as-is).
 - Opening behaviour for the numbered jumps (they are select-only by decision above).
-- `[`/`]` filtered paging (shipped in Ticket 03).
 
 ---
 
@@ -97,7 +118,8 @@ Out of scope:
 
 ## 1. Keys (`handleKey`, `internal/tui/model.go`)
 
-Replace the `g` / `h` / `p` cases with `1` / `2` / `3`, and extend `esc`:
+Replace the `g` / `h` / `p` cases with `1` / `2` / `3`, delete the `[` / `]` cases, and
+extend `esc`:
 
 ```go
 case "1":
@@ -109,7 +131,7 @@ case "2":
 case "3":
     m.selectFirstKind(navPage)     // first PAGES row; select-only (was `p`)
     return m, nil
-// ... f / F / [ / ] / enter / arrows unchanged ...
+// `[` / `]` cases removed; f / F / enter / arrows unchanged
 case "esc":
     if m.isFiltered() {            // NEW: clear filter first, then stop
         m.clearFilter()
@@ -193,6 +215,21 @@ filterKeys = "F clear · tab focus · enter open · q quit"
 Drop the old `g overview · h header` hints too. The strings stay one line wide (the filter
 token already shares the filtered line — see Ticket 03's footer rework).
 
+The header label lives in a small helper next to `sectionForNavItem`, called from
+`viewNavigation` where headers were previously rendered with `strings.ToUpper(row.section)`:
+
+```go
+// sectionLabel renders a section header with its jump-key number prefix (e.g. "[1] MAIN").
+// Sections without a jump key render bare.
+func sectionLabel(section string) string {
+    num := map[string]string{"Main": "1", "B-Trees": "2", "Pages": "3"}[section]
+    if num == "" {
+        return strings.ToUpper(section)
+    }
+    return "[" + num + "] " + strings.ToUpper(section)
+}
+```
+
 ## 4. Doc reconciliation (`design.md`)
 
 - §3 key table: replace the `g` / `h` rows with `1` / `2` / `3` (select-only), and change the
@@ -209,43 +246,45 @@ token already shares the filtered line — see Ticket 03's footer rework).
 ## Acceptance criteria
 
 **Keys**
-- [ ] `1` selects the first `MAIN` row (Overview) without opening it; focus unchanged.
-- [ ] `2` selects the first `B-TREES` row (first table, or first index when there are no
+- [x] `1` selects the first `MAIN` row (Overview) without opening it; focus unchanged.
+- [x] `2` selects the first `B-TREES` row (first table, or first index when there are no
       tables) without opening it.
-- [ ] `3` selects the first `PAGES` row without opening it (replaces `p`).
-- [ ] `g` / `h` / `p` are removed and are now no-ops.
-- [ ] `esc` while filtered clears the filter and does nothing else.
-- [ ] `esc` while unfiltered keeps today's behaviour: page-summary return inside an open
+- [x] `3` selects the first `PAGES` row without opening it (replaces `p`).
+- [x] `g` / `h` / `p` are removed and are now no-ops.
+- [x] `[` / `]` are removed and are now no-ops.
+- [x] `esc` while filtered clears the filter and does nothing else.
+- [x] `esc` while unfiltered keeps today's behaviour: page-summary return inside an open
       page, else reset to Overview.
-- [ ] The numbered jumps are no-ops (no panic, `selectedIndex` unchanged) when the target
+- [x] The numbered jumps are no-ops (no panic, `selectedIndex` unchanged) when the target
       section is empty.
 
 **Arrows**
-- [ ] `↓` on the last row of a section stays put (does not enter the next section); `↑` on
+- [x] `↓` on the last row of a section stays put (does not enter the next section); `↑` on
       the first row of a section stays put.
-- [ ] `↑`/`↓` move freely between rows **within** a section (incl. across tables↔indexes
+- [x] `↑`/`↓` move freely between rows **within** a section (incl. across tables↔indexes
       inside B-TREES).
-- [ ] Crossing sections is possible only via `1`/`2`/`3`.
+- [x] Crossing sections is possible only via `1`/`2`/`3`.
 
-**Footer**
-- [ ] `navKeys` / `filterKeys` advertise `1 main · 2 b-trees · 3 pages` and no longer mention
-      `g` / `h` / `p`.
+**Headers & footer**
+- [x] Nav-pane section headers render as `[1] MAIN` / `[2] B-TREES` / `[3] PAGES`.
+- [x] `navKeys` / `filterKeys` no longer mention `g` / `h` / `p`, `[` / `]`, or the verbose
+      `1 main · 2 b-trees · 3 pages` tokens.
 
 **Docs**
-- [ ] `design.md` §3 (and the §4.1 footer) match the shipped bindings.
+- [x] `design.md` §3 (and the §4 footers) match the shipped bindings.
 
 **General**
-- [ ] `go build ./...` and `go vet ./...` clean; full `go test ./...` green.
+- [x] `go build ./...` and `go vet ./...` clean; full `go test ./...` green.
 
 ---
 
 ## Testing
 
-Pure `handleKey` behaviour, unit-testable in `internal/tui` via `Update` + `keyMsg` (helpers
-already exist in `filter_test.go`). Suggested cases in a new `keys_test.go` (or appended):
+Pure `handleKey` / render behaviour, unit-tested in `internal/tui/keys_test.go` via `Update`
++ `keyMsg` (helpers reused from `filter_test.go`). Shipped cases:
 
 - **`TestSectionJumpsSelectOnly`** — from an arbitrary selection, `1` lands on the Overview
-  row, `2` on the first table row, `3` on the first page row; `m.active` is unchanged each
+  row, `2` on the first B-TREES row, `3` on the first page row; `m.active` is unchanged each
   time (proves select-only, no open).
 - **`TestJumpBTreesFallsBackToIndex`** — with a view model that has indexes but no tables, `2`
   lands on the first `navIndex` row.
@@ -256,7 +295,10 @@ already exist in `filter_test.go`). Suggested cases in a new `keys_test.go` (or 
 - **`TestEscUnfilteredKeepsExistingBehaviour`** — unfiltered, `esc` inside an open page with
   `explorerIndex > 0` returns to the page summary; from elsewhere it resets to Overview.
 - **`TestArrowsConfinedToSection`** — on the last MAIN row, `↓` does not advance into
-  B-TREES; on the first B-TREES row, `↑` does not return to MAIN; `↓` within B-TREES crosses
-  from the last table row to the first index row.
-- **Render** — `View()` footer contains `1 main · 2 b-trees · 3 pages` in both the unfiltered
-  and filtered hint bars.
+  B-TREES; on the first B-TREES row, `↑` does not return to MAIN; `↓` within B-TREES stays in
+  the section and advances.
+- **`TestSectionHeadersShowJumpNumbers`** — `View()` contains `[1] MAIN` / `[2] B-TREES` /
+  `[3] PAGES`, and the footer no longer carries the verbose section tokens or `g`/`h` hints.
+
+The Ticket 03 test `TestFilteredPagingClampsAtEnds` was **removed** alongside the `[`/`]`
+binding it exercised.
