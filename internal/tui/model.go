@@ -41,6 +41,13 @@ type contentTarget struct {
 	schemaName string
 }
 
+// filterSource identifies the single object PAGES is scoped to. It stores the object
+// only; the page set and skip diagnostics are derived from pageIndex on demand (the DB is
+// read-only and the index is immutable once built, so there is nothing to snapshot).
+type filterSource struct {
+	object schemaObjectViewModel // Type → icon, Name, RootPage (0 for virtual tables / views)
+}
+
 type model struct {
 	inspector       *sqlite.Inspector
 	db              databaseViewModel
@@ -57,6 +64,12 @@ type model struct {
 	status          string
 	loading         bool
 	err             error
+	pageIndex       sqlite.PageIndex  // root → PageWalk (ready entries only)
+	indexRoots      []uint32          // unique, non-zero roots dispatched at launch
+	indexErrors     map[uint32]string // root → hard-failure reason (transient; NOT serialized)
+	indexPending    int               // roots still being walked (indexTotal → 0)
+	indexTotal      int               // total roots dispatched
+	activeFilter    *filterSource     // nil = unfiltered
 }
 
 func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) (model, error) {
@@ -65,21 +78,118 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 		return model{}, err
 	}
 
+	indexRoots := collectBTreeRoots(db)
+
 	return model{
 		inspector:     inspector,
 		db:            db,
-		navItems:      buildNavItems(db),
+		navItems:      buildNavItems(db, nil, nil),
 		active:        contentTarget{kind: navOverview},
 		focusedPane:   navPane,
 		width:         120,
 		height:        34,
-		status:        "tab focus | up/down move | enter open | g overview | h header | p pages | [ ] page | q quit",
+		status:        "",
 		selectedIndex: 0,
+		pageIndex:     sqlite.NewPageIndex(),
+		indexRoots:    indexRoots,
+		indexErrors:   map[uint32]string{},
+		indexPending:  len(indexRoots),
+		indexTotal:    len(indexRoots),
 	}, nil
 }
 
+// applyFilter scopes PAGES to obj's b-tree. A virtual table / view (RootPage == 0) is a
+// valid filter with an empty page set; an indexed object filters to its walked pages. If
+// the object hard-failed or has not been walked yet, the filter is NOT applied and a
+// status explains why (the user re-presses f once indexing finishes — see design §4.5).
+func (m *model) applyFilter(obj schemaObjectViewModel) {
+	switch {
+	case obj.RootPage == 0: // virtual table / view: no b-tree, valid empty filter
+		m.setFilter(obj)
+	case m.walkPresent(obj.RootPage):
+		m.setFilter(obj)
+	case m.hasIndexError(obj.RootPage):
+		m.status = "⚠ can't filter " + objectIcon(obj) + " " + obj.Name + ": " + m.indexErrors[obj.RootPage]
+	default:
+		m.status = "still indexing " + objectIcon(obj) + " " + obj.Name + "… try again in a moment"
+	}
+}
+
+// setFilter stores the filter, rebuilds the nav list so PAGES re-scopes, and keeps the
+// cursor on the source row (design §4.2).
+func (m *model) setFilter(obj schemaObjectViewModel) {
+	m.activeFilter = &filterSource{object: obj}
+	pages, _ := m.filteredPages()
+	m.navItems = buildNavItems(m.db, m.activeFilter, pages)
+	m.selectedIndex = indexOfBTreeRow(m.navItems, obj)
+	m.status = fmt.Sprintf("filtered to %s %s", objectIcon(obj), obj.Name)
+}
+
+// clearFilter drops the active filter, rebuilds the full 1..PageCount PAGES list, and
+// keeps the cursor on the same B-TREES row.
+func (m *model) clearFilter() {
+	if m.activeFilter == nil {
+		return
+	}
+	src := m.activeFilter.object
+	m.activeFilter = nil
+	m.navItems = buildNavItems(m.db, nil, nil)
+	m.selectedIndex = indexOfBTreeRow(m.navItems, src)
+	m.status = "filter cleared"
+}
+
+func (m model) isFiltered() bool { return m.activeFilter != nil }
+
+// filteredPages returns (pages, true) when a filter is active (an empty slice for a
+// virtual table), else (nil, false). The bool means "filter active", NOT "has pages".
+func (m model) filteredPages() ([]uint32, bool) {
+	if m.activeFilter == nil {
+		return nil, false
+	}
+	root := m.activeFilter.object.RootPage
+	if root == 0 {
+		return []uint32{}, true
+	}
+	return m.pageIndex.Pages(root), true
+}
+
+func (m model) walkPresent(root uint32) bool {
+	_, ok := m.pageIndex.Walk(root)
+	return ok
+}
+
+func (m model) hasIndexError(root uint32) bool {
+	_, ok := m.indexErrors[root]
+	return ok
+}
+
+// objectIsFilterSource reports whether obj is the object the active filter is scoped to.
+// Name disambiguates virtual tables / views, which all share RootPage == 0.
+// pagesSummaryLine is the summary pane's Pages row for obj: the filtered count when obj is
+// the active filter source, "— (unfiltered)" otherwise (design §4.1 / §4.2).
+func (m model) pagesSummaryLine(obj schemaObjectViewModel) string {
+	if m.objectIsFilterSource(obj) {
+		pages, _ := m.filteredPages()
+		return fmt.Sprintf("Pages:     %d (filtered)", len(pages))
+	}
+	return "Pages:     — (unfiltered)"
+}
+
+func (m model) objectIsFilterSource(obj schemaObjectViewModel) bool {
+	return m.activeFilter != nil &&
+		m.activeFilter.object.Name == obj.Name &&
+		m.activeFilter.object.RootPage == obj.RootPage
+}
+
 func (m model) Init() tea.Cmd {
-	return nil
+	if len(m.indexRoots) == 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, len(m.indexRoots))
+	for _, root := range m.indexRoots {
+		cmds = append(cmds, indexBTreeCmd(m.inspector, root))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -97,6 +207,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inspectorScroll = 0
 		m.loading = false
 		m.status = fmt.Sprintf("opened page %d", msg.page.PageNumber)
+		return m, nil
+	case btreeIndexedMsg:
+		if m.indexPending > 0 {
+			m.indexPending--
+		}
+		if msg.err != nil {
+			m.indexErrors[msg.root] = msg.err.Error()
+		} else {
+			m.pageIndex.Set(msg.walk)
+		}
+		// Transient status only; the polished footer token is Ticket 06.
+		if m.indexPending == 0 {
+			m.status = indexCompleteStatus(m)
+		}
 		return m, nil
 	case errMsg:
 		m.loading = false
@@ -118,19 +242,24 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.focusedPane = (m.focusedPane + 2) % 3
 		return m, nil
-	case "g":
-		m.selectFirstKind(navOverview)
-		return m.openSelected()
-	case "h":
-		m.selectFirstKind(navDBHeader)
-		return m.openSelected()
-	case "p":
-		m.selectFirstKind(navPage)
+	case "1":
+		m.selectFirstKind(navOverview) // first MAIN row; select-only
 		return m, nil
-	case "[":
-		return m.openRelativePage(-1)
-	case "]":
-		return m.openRelativePage(1)
+	case "2":
+		m.selectFirstBTreeRow() // first navTable, else first navIndex
+		return m, nil
+	case "3":
+		m.selectFirstKind(navPage) // first PAGES row; select-only (was `p`)
+		return m, nil
+	case "f":
+		item := m.selectedItem()
+		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
+			m.applyFilter(*item.schema)
+		}
+		return m, nil
+	case "F":
+		m.clearFilter()
+		return m, nil
 	case "enter":
 		return m.openSelected()
 	case "up", "k":
@@ -167,6 +296,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc":
+		if m.isFiltered() {
+			m.clearFilter()
+			return m, nil
+		}
 		if m.active.kind == navPage && m.focusedPane == explorerPane && m.explorerIndex > 0 {
 			m.explorerIndex = 0
 			m.inspectorScroll = 0
@@ -186,11 +319,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) moveSelection(delta int) {
 	next := m.selectedIndex + delta
-	if next < 0 {
-		next = 0
+	if next < 0 || next >= len(m.navItems) {
+		return
 	}
-	if next >= len(m.navItems) {
-		next = len(m.navItems) - 1
+	// Arrows stay within the current section; 1/2/3 cross sections.
+	if sectionForNavItem(m.navItems[next]) != sectionForNavItem(m.navItems[m.selectedIndex]) {
+		return
 	}
 	m.selectedIndex = next
 	m.inspectorScroll = 0
@@ -199,6 +333,17 @@ func (m *model) moveSelection(delta int) {
 func (m *model) selectFirstKind(kind navKind) {
 	for idx, item := range m.navItems {
 		if item.kind == kind {
+			m.selectedIndex = idx
+			return
+		}
+	}
+}
+
+// selectFirstBTreeRow jumps to the first row of the merged B-TREES section: the first
+// table, or the first index when the database has no tables.
+func (m *model) selectFirstBTreeRow() {
+	for idx, item := range m.navItems {
+		if item.kind == navTable || item.kind == navIndex {
 			m.selectedIndex = idx
 			return
 		}
@@ -272,26 +417,6 @@ func (m model) openSelected() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m model) openRelativePage(delta int) (tea.Model, tea.Cmd) {
-	if m.active.kind != navPage || m.db.PageCount == 0 {
-		return m, nil
-	}
-
-	page := int(m.active.pageNumber) + delta
-	if page < 1 || page > int(m.db.PageCount) {
-		return m, nil
-	}
-
-	for idx, item := range m.navItems {
-		if item.kind == navPage && item.pageNumber == uint32(page) {
-			m.selectedIndex = idx
-			return m.openSelected()
-		}
-	}
-
-	return m, nil
-}
-
 func (m model) View() string {
 	if m.width < 60 || m.height < 12 {
 		return "terminal too small for badger"
@@ -307,8 +432,49 @@ func (m model) View() string {
 	inspector := paneStyle(m.focusedPane == inspectorPane, inspectorWidth, bodyHeight).Render(m.viewInspector(inspectorWidth-2, bodyHeight-2))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, nav, explorer, inspector)
-	status := statusStyle.Width(m.width).Render(truncateLine(m.status, m.width))
+	status := statusStyle.Width(m.width).Render(truncateLine(m.footerLine(), m.width))
 	return lipgloss.JoinVertical(lipgloss.Left, body, status)
+}
+
+// Persistent key-hint bars. The hints are always visible in the footer; the contextual
+// segment (a transient status, or the filter token while filtered) is prepended to them.
+const (
+	navKeys    = "tab focus · ↑↓ move · enter open · f filter · q quit"
+	filterKeys = "F clear · tab focus · enter open · q quit"
+)
+
+// footerLine builds the always-on footer: the key hints, with a leading context segment.
+// While filtered the context is the filter token (and the filter-aware key set); otherwise
+// it is the latest transient status, if any.
+func (m model) footerLine() string {
+	if m.isFiltered() {
+		return m.filterToken() + "  |  " + filterKeys
+	}
+	if m.status != "" {
+		return m.status + "  |  " + navKeys
+	}
+	return navKeys
+}
+
+// filterToken renders the active-filter indicator: the source icon + name, page count, and
+// a degraded-walk tail (· k skipped + ⚠ page N unreadable) when some pages could not be
+// read (design §4.6 / §4.7). The retry / hard-failure statuses are NOT shown here — they
+// only occur while unfiltered, where the transient status segment surfaces them.
+func (m model) filterToken() string {
+	obj := m.activeFilter.object
+	pages, _ := m.filteredPages()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "⦿ filtered: %s %s (%d pg", objectIcon(obj), obj.Name, len(pages))
+	walk, ok := m.pageIndex.Walk(obj.RootPage)
+	if ok && len(walk.Skipped) > 0 {
+		fmt.Fprintf(&b, " · %d skipped", len(walk.Skipped))
+	}
+	b.WriteString(")")
+	if ok && len(walk.Skipped) > 0 {
+		fmt.Fprintf(&b, " | ⚠ page %d unreadable", walk.Skipped[0].Page)
+	}
+	return b.String()
 }
 
 func (m model) selectedItem() navItem {
@@ -345,17 +511,15 @@ func (m model) viewNavigation(width int, height int) string {
 			if len(rows) > 2 {
 				rows = append(rows, "")
 			}
-			rows = append(rows, sectionStyle.Render(strings.ToUpper(row.section)))
+			rows = append(rows, sectionStyle.Render(sectionLabel(row.section)))
 			lastSection = row.section
 		}
 
 		lineStyle := navItemStyle
-		prefix := "  "
 		if row.index == m.selectedIndex {
 			lineStyle = selectedNavItemStyle
-			prefix = "> "
 		}
-		rows = append(rows, lineStyle.Width(width).Render(prefix+row.text))
+		rows = append(rows, lineStyle.Width(width).Render(m.navMarker(row.index)+row.text))
 	}
 
 	if selected.kind == navPage && m.loading {
@@ -363,6 +527,23 @@ func (m model) viewNavigation(width int, height int) string {
 	}
 
 	return fitVertical(rows, height)
+}
+
+// navMarker returns the two-cell row prefix: ▶ for the active filter source (it wins, so
+// the cursor and source merge into a single ▶ when they coincide), > for the cursor, two
+// spaces otherwise. Never two markers on a row (design §2).
+func (m model) navMarker(idx int) string {
+	if idx < 0 || idx >= len(m.navItems) {
+		return "  "
+	}
+	item := m.navItems[idx]
+	if item.schema != nil && m.objectIsFilterSource(*item.schema) {
+		return "▶ "
+	}
+	if idx == m.selectedIndex {
+		return "> "
+	}
+	return "  "
 }
 
 type visibleNavRow struct {
@@ -386,7 +567,9 @@ func (m model) visibleNavItems(height int) []visibleNavRow {
 			lastSection = section
 		}
 		text := item.title
-		if item.subtitle != "" {
+		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
+			text = objectIcon(*item.schema) + " " + item.title
+		} else if item.subtitle != "" {
 			text += "  " + mutedInline(item.subtitle)
 		}
 		rows = append(rows, navRow{index: idx, section: section, text: text})
@@ -492,13 +675,18 @@ func (m model) viewSchemaObject(width int) []string {
 		return []string{titleStyle.Render("Schema Object"), "", "No schema object selected."}
 	}
 
+	rootLine := fmt.Sprintf("Root page: %d", obj.RootPage)
+	if obj.RootPage == 0 {
+		rootLine = "Root page: — (no b-tree)"
+	}
+
 	lines := []string{
-		titleStyle.Render("Schema Object"),
+		titleStyle.Render(objectIcon(*obj) + "  " + strings.ToUpper(obj.Type) + "  " + obj.Name),
 		"",
 		fmt.Sprintf("Type: %s", obj.Type),
 		fmt.Sprintf("Name: %s", obj.Name),
 		fmt.Sprintf("Table: %s", obj.TableName),
-		fmt.Sprintf("Root page: %d", obj.RootPage),
+		rootLine,
 		"",
 		sectionStyle.Render("SQL"),
 		obj.SQL,
@@ -508,8 +696,12 @@ func (m model) viewSchemaObject(width int) []string {
 
 func (m model) viewPage(width int) []string {
 	item := m.selectedItem()
+	pageTitle := "Page"
+	if m.isFiltered() {
+		pageTitle = objectIcon(m.activeFilter.object) + " Page"
+	}
 	lines := []string{
-		titleStyle.Render("Page"),
+		titleStyle.Render(pageTitle),
 		"",
 		fmt.Sprintf("Page number: %d", item.pageNumber),
 	}
@@ -597,17 +789,26 @@ func (m model) viewInspector(width int, height int) string {
 		)
 	case navTable, navIndex:
 		if item.schema != nil {
+			obj := *item.schema
+			rootLine := fmt.Sprintf("Root:      page %d", obj.RootPage)
+			if obj.RootPage == 0 {
+				rootLine = "Root:      —"
+			}
 			lines = append(lines,
 				"",
-				sectionStyle.Render("DETAIL"),
-				fmt.Sprintf("Type: %s", item.schema.Type),
-				fmt.Sprintf("Root page: %d", item.schema.RootPage),
-				fmt.Sprintf("Table name: %s", item.schema.TableName),
+				sectionStyle.Render("SUMMARY"),
+				fmt.Sprintf("Type:      %s %s", objectIcon(obj), obj.Type),
+				rootLine,
+				m.pagesSummaryLine(obj),
+				fmt.Sprintf("Table:     %s", obj.TableName),
 				"",
 				sectionStyle.Render("ACTIONS"),
-				"- enter to open summary",
-				fmt.Sprintf("- open page %d", item.schema.RootPage),
 			)
+			if m.objectIsFilterSource(obj) {
+				lines = append(lines, "- F        clear filter", "- enter    open object")
+			} else {
+				lines = append(lines, "- f        filter pages to this b-tree", "- enter    open object")
+			}
 		}
 	case navPage:
 		lines = append(lines,
@@ -825,7 +1026,11 @@ var (
 	scrollbarThumbStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
 
-func buildNavItems(db databaseViewModel) []navItem {
+// buildNavItems builds the flat nav list. Tables and indexes share one B-TREES section.
+// The PAGES section lists filteredPages when filter != nil (an empty list for a virtual
+// table) and the full 1..PageCount otherwise. The root page is intentionally not shown on
+// B-TREES rows (it lives in the detail / summary panes — design §2).
+func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []uint32) []navItem {
 	items := []navItem{
 		{kind: navOverview, title: "Overview"},
 		{kind: navDBHeader, title: "DB Header"},
@@ -834,42 +1039,115 @@ func buildNavItems(db databaseViewModel) []navItem {
 	for _, table := range db.Tables {
 		table := table
 		items = append(items, navItem{
-			kind:     navTable,
-			title:    table.Name,
-			subtitle: fmt.Sprintf("root %d", table.RootPage),
-			schema:   &table,
+			kind:   navTable,
+			title:  table.Name,
+			schema: &table,
 		})
 	}
 
 	for _, index := range db.Indexes {
 		index := index
 		items = append(items, navItem{
-			kind:     navIndex,
-			title:    index.Name,
-			subtitle: fmt.Sprintf("root %d", index.RootPage),
-			schema:   &index,
+			kind:   navIndex,
+			title:  index.Name,
+			schema: &index,
 		})
 	}
 
-	for pageNumber := uint32(1); pageNumber <= db.PageCount; pageNumber++ {
-		items = append(items, navItem{
-			kind:       navPage,
-			title:      fmt.Sprintf("page %d", pageNumber),
-			pageNumber: pageNumber,
-		})
+	if filter != nil {
+		for _, pageNumber := range filteredPages {
+			items = append(items, navItem{
+				kind:       navPage,
+				title:      fmt.Sprintf("page %d", pageNumber),
+				pageNumber: pageNumber,
+			})
+		}
+	} else {
+		for pageNumber := uint32(1); pageNumber <= db.PageCount; pageNumber++ {
+			items = append(items, navItem{
+				kind:       navPage,
+				title:      fmt.Sprintf("page %d", pageNumber),
+				pageNumber: pageNumber,
+			})
+		}
 	}
 
 	return items
+}
+
+// objectIcon maps a schema object to its B-TREES glyph: ◈ index, ⊞ virtual table / view
+// (no b-tree, RootPage == 0), ▦ ordinary table. Echoed in nav rows, detail/page titles,
+// and the footer filter token. Glyphs are placeholders pending terminal testing (design §7).
+func objectIcon(obj schemaObjectViewModel) string {
+	switch {
+	case obj.Type == "index":
+		return "◈"
+	case obj.RootPage == 0:
+		return "⊞"
+	default:
+		return "▦"
+	}
+}
+
+// indexOfBTreeRow returns the nav index of the B-TREES row for obj, or 0 if absent.
+func indexOfBTreeRow(items []navItem, obj schemaObjectViewModel) int {
+	for idx, item := range items {
+		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil &&
+			item.schema.Name == obj.Name && item.schema.RootPage == obj.RootPage {
+			return idx
+		}
+	}
+	return 0
+}
+
+// collectBTreeRoots returns the unique, non-zero b-tree root pages across the database's
+// tables and indexes. A root belongs to exactly one object, but it dedupes defensively;
+// RootPage == 0 (views / virtual tables, which have no b-tree) is skipped.
+func collectBTreeRoots(db databaseViewModel) []uint32 {
+	seen := make(map[uint32]bool)
+	roots := make([]uint32, 0, len(db.Tables)+len(db.Indexes))
+
+	collect := func(objects []schemaObjectViewModel) {
+		for _, obj := range objects {
+			if obj.RootPage == 0 || seen[obj.RootPage] {
+				continue
+			}
+			seen[obj.RootPage] = true
+			roots = append(roots, obj.RootPage)
+		}
+	}
+
+	collect(db.Tables)
+	collect(db.Indexes)
+	return roots
+}
+
+// indexCompleteStatus is the transient one-line status shown once every root has been
+// walked. The polished footer treatment lands in Ticket 06.
+func indexCompleteStatus(m model) string {
+	indexed := len(m.indexRoots) - len(m.indexErrors)
+	if len(m.indexErrors) == 0 {
+		return fmt.Sprintf("indexed %d b-trees", indexed)
+	}
+	return fmt.Sprintf("indexed %d b-trees (%d failed)", indexed, len(m.indexErrors))
+}
+
+// sectionLabel renders a section header with its jump-key number prefix (e.g. "[1] MAIN"),
+// advertising the 1/2/3 section jumps inline. Sections without a jump key render bare.
+func sectionLabel(section string) string {
+	num := map[string]string{"Main": "1", "B-Trees": "2", "Pages": "3"}[section]
+	if num == "" {
+		return strings.ToUpper(section)
+	}
+	return "[" + num + "] " + strings.ToUpper(section)
 }
 
 func sectionForNavItem(item navItem) string {
 	switch item.kind {
 	case navOverview, navDBHeader:
 		return "Main"
-	case navTable:
-		return "Tables"
-	case navIndex:
-		return "Indexes"
+	case navTable, navIndex:
+		return "B-Trees"
 	case navPage:
 		return "Pages"
 	default:

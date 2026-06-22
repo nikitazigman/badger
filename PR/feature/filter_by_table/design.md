@@ -1,0 +1,281 @@
+# Design: Filter Pages by Table or Index
+
+> Branch: `feature/filter_by_table`
+> Status: **Design agreed.** No implementation yet.
+> Companion docs: `context.md`, `codebase-map.md`, `feature-notes.md`.
+
+This document specifies the UX for filtering the page list down to the pages belonging to
+a single table or index b-tree.
+
+---
+
+## 1. Summary
+
+Badger lists every page `1..PageCount` in a flat `PAGES` section. This feature lets the
+user pick one schema object (a table **or** an index) and scope the `PAGES` list to **only
+the pages of that object's b-tree**.
+
+The filter is a **persistent mode**: once applied it stays active across all navigation
+until explicitly cleared. Only one b-tree can be filtered at a time.
+
+### Confirmed product decisions
+- **Scope = b-tree only.** The pages of the selected object's own b-tree (interior + leaf,
+  reachable from its root page). Overflow pages are **not** included. A table's indexes are
+  **not** pulled in — an index is filtered on its own.
+- **One filter at a time.** Tables and indexes share a single `B-TREES` navigation section,
+  so the user selects exactly one object as the filter source.
+- **Persistent mode.** Filter state lives in the footer status bar and survives navigation
+  until cleared.
+- **Virtual tables / views have no b-tree** (`rootpage 0`). They still appear in `B-TREES`
+  with a distinct icon (`⊞`); selecting one and pressing `f` applies a filter whose page
+  set is **empty (0 pages)** rather than being rejected.
+
+---
+
+## 2. Navigation model
+
+The left navigation pane has three numbered sections (lazygit-style jump targets):
+
+| Section       | Contents                                                        |
+|---------------|-----------------------------------------------------------------|
+| `[1] MAIN`    | Overview, DB Header                                             |
+| `[2] B-TREES` | All tables and indexes, merged. `▦` = table, `◈` = index, `⊞` = virtual table (no b-tree). |
+| `[3] PAGES`   | Page list. Full `1..PageCount` when unfiltered; the selected b-tree's pages when filtered. |
+
+Notes:
+- The `B-TREES` section shows **icon + name only**. The root page is intentionally *not*
+  shown here (it was visual noise); it appears in the middle detail pane (`root page N`)
+  and the right summary (`Root: page N`).
+- The icon (`▦` / `◈` / `⊞`) also echoes into the middle detail pane title, the page title
+  when a page is open, and the footer filter token.
+
+### Row markers
+- **`>` (hollow)** — the cursor / current selection.
+- **`▶` (solid)** — the active filter source row.
+- When the cursor sits on the filter source, the two merge into a single solid `▶`
+  (no double markers anywhere).
+
+---
+
+## 3. Key bindings
+
+| Key        | Context                          | Action                                              |
+|------------|----------------------------------|-----------------------------------------------------|
+| `1`        | anywhere in nav                  | Jump selection to first item of `MAIN`              |
+| `2`        | anywhere in nav                  | Jump selection to first item of `B-TREES`           |
+| `3`        | anywhere in nav                  | Jump selection to first item of `PAGES`             |
+| `f`        | a `B-TREES` row selected         | Apply filter: scope `PAGES` to that object's b-tree (empty for a virtual table) |
+| `F`        | filter active                    | Clear the filter                                    |
+| `esc`      | anywhere                         | Clear the filter (when filtered); else return to page summary / overview |
+| `enter`    | any nav row                      | Open the selected object/page in the explorer       |
+| `tab`      | anywhere                         | Cycle pane focus (nav / explorer / inspector)       |
+| `↑ / ↓`    | nav                              | Move selection **within the current section**       |
+| `q`        | anywhere                         | Quit                                                |
+
+The `1` / `2` / `3` jumps are **select-only** — they move the cursor without opening the
+item (`enter` opens). The section headers in the nav pane advertise these keys inline as
+`[1] MAIN` / `[2] B-TREES` / `[3] PAGES`. They replace the former `g` / `h` / `p` bindings,
+which are removed.
+
+`↑` / `↓` are **confined to the current section** (MAIN / B-TREES / PAGES): they stop at the
+first / last row of the section rather than spilling into the next one. Crossing between
+sections is done exclusively with the numbered jumps `1` / `2` / `3`. To page through a
+filtered set, jump to `PAGES` (`3`) and move with `↑` / `↓` — there is no dedicated
+prev/next-page binding.
+
+---
+
+## 4. Screens / states
+
+Layout is the existing three-pane shell: **Navigation | Explorer (detail) | Summary**,
+with a footer status bar.
+
+### 4.1 Filter OFF — table selected
+
+```
+┌─ Navigation ───────────┬─ companies ──────────────────────┬─ Selected: companies ──────┐
+│ [1] MAIN                │ ▦ TABLE  companies                │ SUMMARY                     │
+│   Overview              │ root page 2                       │ Type:     table             │
+│   DB Header             │ Columns: 7                        │ Root:     page 2            │
+│                         │ CREATE TABLE companies (          │ Pages:    — (unfiltered)    │
+│ [2] B-TREES             │   id INTEGER PRIMARY KEY,         │                             │
+│ > ▦ companies           │   name TEXT, country TEXT, ...    │ ACTIONS                     │
+│   ▦ sqlite_sequence     │ )                                 │ - press f to filter pages   │
+│   ◈ idx_companies_…     │                                   │   to this b-tree            │
+│                         │ ┌─────────────────────────────┐  │ - enter  open object        │
+│ [3] PAGES               │ │ Press  f  to filter pages   │  │                             │
+│   page 1                │ │ to the companies b-tree     │  │                             │
+│   page 2 … page 1910    │ └─────────────────────────────┘  │                             │
+└─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
+ tab focus · ↑↓ move · enter open · f filter · q quit
+```
+
+### 4.2 Filter ON by table — cursor on source row (solid `▶`)
+
+```
+┌─ Navigation ───────────┬─ companies ──────────────────────┬─ Selected: companies ──────┐
+│ [1] MAIN                │ ▦ TABLE  companies                │ SUMMARY                     │
+│   Overview              │ root page 2                       │ Type:     table             │
+│   DB Header             │ Columns: 7                        │ Root:     page 2            │
+│                         │ CREATE TABLE companies (          │ Pages:    1842 (filtered)   │
+│ [2] B-TREES             │   id INTEGER PRIMARY KEY,         │                             │
+│ ▶ ▦ companies           │   name TEXT, ...                  │ ACTIONS                     │
+│   ▦ sqlite_sequence     │ )                                 │ - F / esc  clear filter     │
+│   ◈ idx_companies_…     │                                   │ - enter    open object      │
+│                         │                                   │                             │
+│ [3] PAGES               │                                   │                             │
+│   page 2                │                                   │                             │
+│   page 9 … (1840 more)  │                                   │                             │
+└─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
+ ⦿ filtered: ▦ companies (1842 pg) | F clear | q quit
+```
+
+### 4.3 Filter ON by table — after `3` jumps to PAGES
+
+Cursor `>` moves to a page row; the source row keeps the solid `▶`.
+
+```
+┌─ Navigation ───────────┬─ page 9 ─────────────────────────┬─ Selected: page 9 ─────────┐
+│ [1] MAIN                │ ▦ PAGE 9  leaf table b-tree       │ SUMMARY                     │
+│   Overview              │                                   │ Page kind: leaf table       │
+│   DB Header             │                                   │ Cells:     31               │
+│                         │ Page Header        offset 0..8    │ Right ptr: —                │
+│ [2] B-TREES             │ Cell Pointers      offset 8..70   │                             │
+│ ▶ ▦ companies           │ Leaf Cell #0   rowid 1            │ ACTIONS                     │
+│   ▦ sqlite_sequence     │ Leaf Cell #1   rowid 2            │ - F / esc  clear filter     │
+│   ◈ idx_companies_…     │ ...                               │ - enter    open page        │
+│                         │                                   │                             │
+│ [3] PAGES               │                                   │                             │
+│   page 2                │                                   │                             │
+│ > page 9                │                                   │                             │
+│   page 17 … (1839 more) │                                   │                             │
+└─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
+ ⦿ filtered: ▦ companies (1842 pg) | F clear | q quit
+```
+
+### 4.4 Filter ON by index — cursor on source row (solid `▶`)
+
+```
+┌─ Navigation ───────────┬─ idx_companies_country ──────────┬─ Selected: idx_companies_… ┐
+│ [1] MAIN                │ ◈ INDEX  idx_companies_country    │ SUMMARY                     │
+│   Overview              │ root page 4                       │ Type:     index             │
+│   DB Header             │ on table: companies               │ Root:     page 4            │
+│                         │ CREATE INDEX idx_companies_country│ Pages:    68 (filtered)     │
+│ [2] B-TREES             │   ON companies(country)           │                             │
+│   ▦ companies           │                                   │ ACTIONS                     │
+│   ▦ sqlite_sequence     │                                   │ - F / esc  clear filter     │
+│ ▶ ◈ idx_companies_…     │                                   │ - enter    open object      │
+│                         │                                   │                             │
+│ [3] PAGES               │                                   │                             │
+│   page 4                │                                   │                             │
+│   page 12 … (66 more)   │                                   │                             │
+└─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
+ ⦿ filtered: ◈ idx_companies_country (68 pg) | F clear | q quit
+```
+
+### 4.5 Selected object not yet indexed
+
+The b-tree index is built eagerly at launch (Ticket 02), so by the time the user navigates
+to an object it is almost always ready. In the rare case the user presses `f` before that
+object's walk has finished, the filter is **not** applied; the footer shows a status asking
+them to retry. There is no auto-applying spinner — the user simply presses `f` again once
+indexing is done.
+
+```
+ still indexing ▦ companies… try again in a moment | q quit
+```
+
+If the object's walk hard-failed during indexing, `f` reports that instead and stays
+unfiltered:
+
+```
+ ⚠ can't filter ▦ companies: <reason> | q quit
+```
+
+### 4.6 Degraded filter (unreadable pages)
+
+If some of an object's pages can't be read, the filter still applies with the pages that
+could be read, and surfaces the gap instead of failing the workspace. The `PAGES` list
+still populates with what is available.
+
+```
+ ⦿ filtered: ▦ companies (1841 pg · 1 skipped) | ⚠ page 774 unreadable | F clear | q quit
+```
+
+### 4.7 Filter ON by virtual table — zero pages
+
+A virtual table (or view) has no b-tree of its own (`rootpage 0`). It still appears in
+`B-TREES` with the `⊞` icon and can be filtered; the resulting page set is simply empty.
+`PAGES` shows nothing and the footer reports `0 pg`. This is a valid filtered state, not an
+error.
+
+```
+┌─ Navigation ───────────┬─ fts_docs ───────────────────────┬─ Selected: fts_docs ───────┐
+│ [2] B-TREES             │ ⊞ VIRTUAL  fts_docs               │ SUMMARY                     │
+│   ▦ companies           │ no b-tree (rootpage 0)            │ Type:     virtual table     │
+│ ▶ ⊞ fts_docs            │                                   │ Root:     —                 │
+│   ◈ idx_companies_…     │                                   │ Pages:    0 (filtered)      │
+│                         │                                   │                             │
+│ [3] PAGES               │                                   │ ACTIONS                     │
+│   (no pages)            │                                   │ - F / esc  clear filter     │
+└─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
+ ⦿ filtered: ⊞ fts_docs (0 pg) | F clear | q quit
+```
+
+---
+
+## 5. User flows
+
+### Flow A — Apply a filter
+1. User opens nav (or presses `2` to jump to `B-TREES`).
+2. User moves to a table or index row.
+3. User presses `f`. (If that object is not yet indexed, the filter is not applied and a
+   retry status shows instead — see §4.5. A virtual table applies with an empty set — §4.7.)
+4. Once applied:
+   - `PAGES` is scoped to the object's page set.
+   - The source row shows the solid `▶`.
+   - The footer shows `⦿ filtered: <icon> <name> (<n> pg) | F clear`.
+   - The middle/summary panes show `Pages: <n> (filtered)`.
+
+### Flow B — Browse filtered pages
+1. With a filter active, user presses `3` to jump to `PAGES` (or arrows down to it).
+2. Cursor `>` lands on the first filtered page; the source row keeps `▶`.
+3. `enter` opens a page; `[` / `]` step through the filtered set only.
+
+### Flow C — Switch the filter to a different object
+1. User presses `2` (or navigates) to `B-TREES`.
+2. User selects a different table/index and presses `f`.
+3. The previous filter is replaced (single-filter rule); `PAGES` re-scopes to the new
+   object and the solid `▶` moves to the new source row.
+
+### Flow D — Clear the filter
+1. From anywhere, user presses `F` (or `esc` while a filter is active).
+2. `PAGES` returns to the full `1..PageCount` list.
+3. The footer filter token disappears; the `▶` marker reverts to a plain cursor.
+
+---
+
+## 6. Scope of the filter
+
+What "the pages of an object" means is a product decision, independent of how the set is
+computed:
+
+- **B-tree only.** The interior + leaf pages reachable from the object's own root page.
+- **No overflow pages.** Large-payload overflow chains are not part of the filtered set.
+- **Indexes are filtered independently.** Filtering a table does *not* pull in the pages of
+  its indexes; an index is selected and filtered as its own object.
+- **Virtual tables / views have no b-tree.** Filtering one yields an empty page set
+  (0 pages); it is a valid filter, not an error.
+
+---
+
+## 7. Open / deferred items
+- Exact glyphs (`▦` / `◈` / `⊞`) are placeholders; confirm they render well in target
+  terminals. Fallback: `[T]` / `[I]` / `[V]`.
+- Whether to persist the last-used filter across app restarts (currently: no).
+
+### Reconciliations folded in
+- **§4.5** changed from a self-resolving "⟳ preparing…" spinner to a "still indexing… try
+  again" status. Because Ticket 02 builds the index eagerly at launch and Ticket 03 drops
+  the pending-filter idea, `f` on a not-yet-indexed object reports a retry status rather
+  than queuing an auto-apply — filtering never triggers a walk.
