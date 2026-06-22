@@ -1,7 +1,7 @@
 # Ticket 02 — Background page index (parallel walk at launch)
 
 > Feature: **Filter Pages by Table or Index** (`feature/filter_by_table`)
-> Status: **Ready for implementation.**
+> Status: **✅ Done** (`edf55e0`). Result: [results/02-background-indexing.md](../results/02-background-indexing.md).
 > Depends on: [Ticket 01](01-btree-traversal.md) (`PagesForRoot` / `PageWalk`) — ✅ done (`84f69bc`).
 > Context: [context.md](../context.md) · [codebase-map.md](../codebase-map.md) · [feature-notes.md](../feature-notes.md) · [design.md](../design.md)
 
@@ -220,25 +220,25 @@ These should be reconciled into `design.md` when Ticket 03 (filter state) is pic
 
 ## Acceptance criteria
 
-- [ ] `PageIndex` (with `Walks map[uint32]PageWalk`), `NewPageIndex`, `Set`, `Walk`, and
+- [x] `PageIndex` (with `Walks map[uint32]PageWalk`), `NewPageIndex`, `Set`, `Walk`, and
       `Pages` exist in `internal/sqlite/page_index.go`.
-- [ ] `btreeIndexedMsg` and `indexBTreeCmd` exist in `internal/tui/app.go`, mirroring the
+- [x] `btreeIndexedMsg` and `indexBTreeCmd` exist in `internal/tui/app.go`, mirroring the
       `loadPageCmd` / `pageLoadedMsg` pattern.
-- [ ] `model` holds `pageIndex`, `indexRoots`, `indexErrors`, `indexPending`, `indexTotal`,
+- [x] `model` holds `pageIndex`, `indexRoots`, `indexErrors`, `indexPending`, `indexTotal`,
       all initialized in `newModel`.
-- [ ] `Init()` returns a `tea.Batch` with exactly one command per unique non-zero root, and
+- [x] `Init()` returns a `tea.Batch` with exactly one command per unique non-zero root, and
       `nil` when there are no roots.
-- [ ] `collectBTreeRoots` returns unique roots from tables + indexes, excludes `0`, and
+- [x] `collectBTreeRoots` returns unique roots from tables + indexes, excludes `0`, and
       contains no duplicates.
-- [ ] After all `btreeIndexedMsg`s are processed, `pageIndex.Walk(root)` returns a walk for
+- [x] After all `btreeIndexedMsg`s are processed, `pageIndex.Walk(root)` returns a walk for
       every successfully-walked root, matching a direct `PagesForRoot(root)` call.
-- [ ] A hard-failing root is recorded in `indexErrors[root]` (reason string) and is **not**
+- [x] A hard-failing root is recorded in `indexErrors[root]` (reason string) and is **not**
       present in `pageIndex`; the walk for it does not appear, but other roots still index.
-- [ ] `indexPending` reaches `0` exactly when `indexTotal` messages have been processed.
-- [ ] The walk runs off the UI goroutine: `Init` returns commands; no `PagesForRoot` call
+- [x] `indexPending` reaches `0` exactly when `indexTotal` messages have been processed.
+- [x] The walk runs off the UI goroutine: `Init` returns commands; no `PagesForRoot` call
       happens on the `Update`/`View` path.
-- [ ] No filter UI, key bindings, or PAGES-list changes (kept for Tickets 03–06).
-- [ ] `go vet ./...` clean; existing tests still pass.
+- [x] No filter UI, key bindings, or PAGES-list changes (kept for Tickets 03–06).
+- [x] `go vet ./...` clean; existing tests still pass.
 
 ---
 
