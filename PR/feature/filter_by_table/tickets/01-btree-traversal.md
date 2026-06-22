@@ -1,7 +1,7 @@
 # Ticket 01 — B-tree traversal: `rootpage → set of pages`
 
 > Feature: **Filter Pages by Table or Index** (`feature/filter_by_table`)
-> Status: **Ready to implement.**
+> Status: **✅ Done** — see [results/01-btree-traversal.md](../results/01-btree-traversal.md) (commit `84f69bc`).
 > Context: [context.md](../context.md) · [codebase-map.md](../codebase-map.md) · [feature-notes.md](../feature-notes.md) · [design.md](../design.md)
 
 ---
@@ -119,20 +119,20 @@ Defensive details:
 
 ## Acceptance criteria
 
-- [ ] `PagesForRoot` exists on `*Inspector` in `internal/sqlite/btree_walk.go` with the
+- [x] `PagesForRoot` exists on `*Inspector` in `internal/sqlite/btree_walk.go` with the
       signature above.
-- [ ] For a single-page (leaf-only) table, returns exactly `[root]`.
-- [ ] For a multi-level table (interior + leaves), returns every reachable page, sorted and
+- [x] For a single-page (leaf-only) table, returns exactly `[root]`.
+- [x] For a multi-level table (interior + leaves), returns every reachable page, sorted and
       unique, including the root and all leaves under both interior cells and the
       right-most pointer.
-- [ ] An index root returns the index's own b-tree pages only (no table pages).
-- [ ] A cyclic/self-referential child pointer terminates (no infinite loop) and the page is
+- [x] An index root returns the index's own b-tree pages only (no table pages).
+- [x] A cyclic/self-referential child pointer terminates (no infinite loop) and the page is
       counted once.
-- [ ] A child page that fails to parse is recorded in `Skipped` and the walk still returns
+- [x] A child page that fails to parse is recorded in `Skipped` and the walk still returns
       the reachable pages; no panic, no returned error.
-- [ ] A hard-failing root (unreadable / out of range) returns a non-nil error.
-- [ ] `root == 0` returns an empty `PageWalk` with no error.
-- [ ] No changes outside `internal/sqlite` (no TUI, no model).
+- [x] A hard-failing root (unreadable / out of range) returns a non-nil error.
+- [x] `root == 0` returns an empty `PageWalk` with no error.
+- [x] No changes outside `internal/sqlite` (no TUI, no model).
 
 ---
 
