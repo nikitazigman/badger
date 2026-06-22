@@ -61,3 +61,16 @@ func loadPageCmd(inspector *sqlite.Inspector, pageNumber uint32) tea.Cmd {
 type pageLoadedMsg struct {
 	page *sqlite.PageInspection
 }
+
+type btreeIndexedMsg struct {
+	root uint32
+	walk sqlite.PageWalk
+	err  error // hard failure from PagesForRoot (unreadable/invalid root)
+}
+
+func indexBTreeCmd(inspector *sqlite.Inspector, root uint32) tea.Cmd {
+	return func() tea.Msg {
+		walk, err := inspector.PagesForRoot(root)
+		return btreeIndexedMsg{root: root, walk: walk, err: err}
+	}
+}
