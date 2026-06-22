@@ -66,20 +66,22 @@ Notes:
 | `3`        | anywhere in nav                  | Jump selection to first item of `PAGES`             |
 | `f`        | a `B-TREES` row selected         | Apply filter: scope `PAGES` to that object's b-tree (empty for a virtual table) |
 | `F`        | filter active                    | Clear the filter                                    |
-| `esc`      | filter active                    | Clear the filter (same as `F`)                      |
+| `esc`      | anywhere                         | Clear the filter (when filtered); else return to page summary / overview |
 | `enter`    | any nav row                      | Open the selected object/page in the explorer       |
 | `tab`      | anywhere                         | Cycle pane focus (nav / explorer / inspector)       |
-| `↑ / ↓`    | nav                              | Move selection                                      |
-| `[` / `]`  | a page open                      | Previous / next page (within the active filter set) |
-| `g`        | anywhere                         | Go to Overview                                      |
-| `h`        | anywhere                         | Go to DB Header                                     |
+| `↑ / ↓`    | nav                              | Move selection **within the current section**       |
 | `q`        | anywhere                         | Quit                                                |
 
-Existing bindings are preserved. New bindings: `1` `2` `3` (section jumps), `f` (apply
-filter), `F` (clear filter). `esc` gains a clear-filter meaning while a filter is active.
+The `1` / `2` / `3` jumps are **select-only** — they move the cursor without opening the
+item (`enter` opens). The section headers in the nav pane advertise these keys inline as
+`[1] MAIN` / `[2] B-TREES` / `[3] PAGES`. They replace the former `g` / `h` / `p` bindings,
+which are removed.
 
-Interaction detail: while a filter is active, `[` / `]` page navigation steps through the
-**filtered** page set, not `1..PageCount`.
+`↑` / `↓` are **confined to the current section** (MAIN / B-TREES / PAGES): they stop at the
+first / last row of the section rather than spilling into the next one. Crossing between
+sections is done exclusively with the numbered jumps `1` / `2` / `3`. To page through a
+filtered set, jump to `PAGES` (`3`) and move with `↑` / `↓` — there is no dedicated
+prev/next-page binding.
 
 ---
 
@@ -105,7 +107,7 @@ with a footer status bar.
 │   page 1                │ │ to the companies b-tree     │  │                             │
 │   page 2 … page 1910    │ └─────────────────────────────┘  │                             │
 └─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
- 1 main · 2 b-trees · 3 pages | tab focus | enter open | f filter b-tree | g overview | q quit
+ tab focus · ↑↓ move · enter open · f filter · q quit
 ```
 
 ### 4.2 Filter ON by table — cursor on source row (solid `▶`)
@@ -125,7 +127,7 @@ with a footer status bar.
 │   page 2                │                                   │                             │
 │   page 9 … (1840 more)  │                                   │                             │
 └─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
- ⦿ filtered: ▦ companies (1842 pg) | F clear | 1 main · 2 b-trees · 3 pages | q quit
+ ⦿ filtered: ▦ companies (1842 pg) | F clear | q quit
 ```
 
 ### 4.3 Filter ON by table — after `3` jumps to PAGES
@@ -148,7 +150,7 @@ Cursor `>` moves to a page row; the source row keeps the solid `▶`.
 │ > page 9                │                                   │                             │
 │   page 17 … (1839 more) │                                   │                             │
 └─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
- ⦿ filtered: ▦ companies (1842 pg) | F clear | 1 main · 2 b-trees · 3 pages | [ ] page | q quit
+ ⦿ filtered: ▦ companies (1842 pg) | F clear | q quit
 ```
 
 ### 4.4 Filter ON by index — cursor on source row (solid `▶`)
@@ -168,7 +170,7 @@ Cursor `>` moves to a page row; the source row keeps the solid `▶`.
 │   page 4                │                                   │                             │
 │   page 12 … (66 more)   │                                   │                             │
 └─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
- ⦿ filtered: ◈ idx_companies_country (68 pg) | F clear | 1 main · 2 b-trees · 3 pages | q quit
+ ⦿ filtered: ◈ idx_companies_country (68 pg) | F clear | q quit
 ```
 
 ### 4.5 Selected object not yet indexed
@@ -180,14 +182,14 @@ them to retry. There is no auto-applying spinner — the user simply presses `f`
 indexing is done.
 
 ```
- still indexing ▦ companies… try again in a moment | 1 main · 2 b-trees · 3 pages | q quit
+ still indexing ▦ companies… try again in a moment | q quit
 ```
 
 If the object's walk hard-failed during indexing, `f` reports that instead and stays
 unfiltered:
 
 ```
- ⚠ can't filter ▦ companies: <reason> | 1 main · 2 b-trees · 3 pages | q quit
+ ⚠ can't filter ▦ companies: <reason> | q quit
 ```
 
 ### 4.6 Degraded filter (unreadable pages)
@@ -217,7 +219,7 @@ error.
 │ [3] PAGES               │                                   │ ACTIONS                     │
 │   (no pages)            │                                   │ - F / esc  clear filter     │
 └─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
- ⦿ filtered: ⊞ fts_docs (0 pg) | F clear | 1 main · 2 b-trees · 3 pages | q quit
+ ⦿ filtered: ⊞ fts_docs (0 pg) | F clear | q quit
 ```
 
 ---
