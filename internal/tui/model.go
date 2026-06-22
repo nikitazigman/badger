@@ -242,14 +242,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.focusedPane = (m.focusedPane + 2) % 3
 		return m, nil
-	case "g":
-		m.selectFirstKind(navOverview)
-		return m.openSelected()
-	case "h":
-		m.selectFirstKind(navDBHeader)
-		return m.openSelected()
-	case "p":
-		m.selectFirstKind(navPage)
+	case "1":
+		m.selectFirstKind(navOverview) // first MAIN row; select-only
+		return m, nil
+	case "2":
+		m.selectFirstBTreeRow() // first navTable, else first navIndex
+		return m, nil
+	case "3":
+		m.selectFirstKind(navPage) // first PAGES row; select-only (was `p`)
 		return m, nil
 	case "f":
 		item := m.selectedItem()
@@ -260,10 +260,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "F":
 		m.clearFilter()
 		return m, nil
-	case "[":
-		return m.openRelativePage(-1)
-	case "]":
-		return m.openRelativePage(1)
 	case "enter":
 		return m.openSelected()
 	case "up", "k":
@@ -300,6 +296,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc":
+		if m.isFiltered() {
+			m.clearFilter()
+			return m, nil
+		}
 		if m.active.kind == navPage && m.focusedPane == explorerPane && m.explorerIndex > 0 {
 			m.explorerIndex = 0
 			m.inspectorScroll = 0
@@ -319,11 +319,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) moveSelection(delta int) {
 	next := m.selectedIndex + delta
-	if next < 0 {
-		next = 0
+	if next < 0 || next >= len(m.navItems) {
+		return
 	}
-	if next >= len(m.navItems) {
-		next = len(m.navItems) - 1
+	// Arrows stay within the current section; 1/2/3 cross sections.
+	if sectionForNavItem(m.navItems[next]) != sectionForNavItem(m.navItems[m.selectedIndex]) {
+		return
 	}
 	m.selectedIndex = next
 	m.inspectorScroll = 0
@@ -332,6 +333,17 @@ func (m *model) moveSelection(delta int) {
 func (m *model) selectFirstKind(kind navKind) {
 	for idx, item := range m.navItems {
 		if item.kind == kind {
+			m.selectedIndex = idx
+			return
+		}
+	}
+}
+
+// selectFirstBTreeRow jumps to the first row of the merged B-TREES section: the first
+// table, or the first index when the database has no tables.
+func (m *model) selectFirstBTreeRow() {
+	for idx, item := range m.navItems {
+		if item.kind == navTable || item.kind == navIndex {
 			m.selectedIndex = idx
 			return
 		}
@@ -405,63 +417,6 @@ func (m model) openSelected() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m model) openRelativePage(delta int) (tea.Model, tea.Cmd) {
-	if m.active.kind != navPage {
-		return m, nil
-	}
-
-	// When filtered, prev/next steps the filtered page set; clamping at either end is a
-	// no-op rather than stepping into a page outside the filter (design §3 / ticket 03).
-	if pages, ok := m.filteredPages(); ok {
-		target, found := stepWithin(pages, m.active.pageNumber, delta)
-		if !found {
-			return m, nil
-		}
-		return m.openPageNumber(target)
-	}
-
-	if m.db.PageCount == 0 {
-		return m, nil
-	}
-	page := int(m.active.pageNumber) + delta
-	if page < 1 || page > int(m.db.PageCount) {
-		return m, nil
-	}
-	return m.openPageNumber(uint32(page))
-}
-
-// openPageNumber selects and opens the nav row for the given page, if present.
-func (m model) openPageNumber(page uint32) (tea.Model, tea.Cmd) {
-	for idx, item := range m.navItems {
-		if item.kind == navPage && item.pageNumber == page {
-			m.selectedIndex = idx
-			return m.openSelected()
-		}
-	}
-	return m, nil
-}
-
-// stepWithin returns the page delta positions away from current inside the sorted set
-// pages, and whether such a page exists (false when current is absent or the step falls
-// off either end — the caller treats that as a no-op).
-func stepWithin(pages []uint32, current uint32, delta int) (uint32, bool) {
-	pos := -1
-	for i, p := range pages {
-		if p == current {
-			pos = i
-			break
-		}
-	}
-	if pos == -1 {
-		return 0, false
-	}
-	next := pos + delta
-	if next < 0 || next >= len(pages) {
-		return 0, false
-	}
-	return pages[next], true
-}
-
 func (m model) View() string {
 	if m.width < 60 || m.height < 12 {
 		return "terminal too small for badger"
@@ -484,8 +439,8 @@ func (m model) View() string {
 // Persistent key-hint bars. The hints are always visible in the footer; the contextual
 // segment (a transient status, or the filter token while filtered) is prepended to them.
 const (
-	navKeys    = "tab focus · ↑↓ move · enter open · f filter · g overview · h header · [ ] page · q quit"
-	filterKeys = "F clear · tab focus · enter open · [ ] page · q quit"
+	navKeys    = "tab focus · ↑↓ move · enter open · f filter · q quit"
+	filterKeys = "F clear · tab focus · enter open · q quit"
 )
 
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
@@ -556,7 +511,7 @@ func (m model) viewNavigation(width int, height int) string {
 			if len(rows) > 2 {
 				rows = append(rows, "")
 			}
-			rows = append(rows, sectionStyle.Render(strings.ToUpper(row.section)))
+			rows = append(rows, sectionStyle.Render(sectionLabel(row.section)))
 			lastSection = row.section
 		}
 
@@ -1175,6 +1130,16 @@ func indexCompleteStatus(m model) string {
 		return fmt.Sprintf("indexed %d b-trees", indexed)
 	}
 	return fmt.Sprintf("indexed %d b-trees (%d failed)", indexed, len(m.indexErrors))
+}
+
+// sectionLabel renders a section header with its jump-key number prefix (e.g. "[1] MAIN"),
+// advertising the 1/2/3 section jumps inline. Sections without a jump key render bare.
+func sectionLabel(section string) string {
+	num := map[string]string{"Main": "1", "B-Trees": "2", "Pages": "3"}[section]
+	if num == "" {
+		return strings.ToUpper(section)
+	}
+	return "[" + num + "] " + strings.ToUpper(section)
 }
 
 func sectionForNavItem(item navItem) string {

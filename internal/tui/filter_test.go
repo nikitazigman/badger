@@ -243,36 +243,6 @@ func TestFilterKeyNoOpOnNonBTreeRow(t *testing.T) {
 	}
 }
 
-func TestFilteredPagingClampsAtEnds(t *testing.T) {
-	t.Parallel()
-
-	m, inspector := newFixtureModel(t, "companies.db")
-	m = indexAll(t, m, inspector)
-	companies := objectByName(t, m.db, "companies")
-	m.applyFilter(companies)
-
-	pages, _ := m.filteredPages()
-	if len(pages) < 2 {
-		t.Skip("need at least two filtered pages")
-	}
-
-	// Open the first filtered page, then step forward: lands on the second filtered page,
-	// NOT pages[0]+1.
-	m.active = contentTarget{kind: navPage, pageNumber: pages[0]}
-	next, _ := m.openRelativePage(1)
-	advanced := next.(model)
-	if advanced.active.pageNumber != pages[1] {
-		t.Fatalf("] advanced to page %d, want filtered page %d", advanced.active.pageNumber, pages[1])
-	}
-
-	// At the last filtered page, stepping forward is a no-op (clamps, no jump to +1).
-	m.active = contentTarget{kind: navPage, pageNumber: pages[len(pages)-1]}
-	next, _ = m.openRelativePage(1)
-	if got := next.(model).active.pageNumber; got != pages[len(pages)-1] {
-		t.Fatalf("] past the last filtered page moved to %d, want it to stay at %d", got, pages[len(pages)-1])
-	}
-}
-
 func TestFilterRenderFooterAndMarkers(t *testing.T) {
 	t.Parallel()
 
