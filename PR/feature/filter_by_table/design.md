@@ -26,6 +26,9 @@ until explicitly cleared. Only one b-tree can be filtered at a time.
   so the user selects exactly one object as the filter source.
 - **Persistent mode.** Filter state lives in the footer status bar and survives navigation
   until cleared.
+- **Virtual tables / views have no b-tree** (`rootpage 0`). They still appear in `B-TREES`
+  with a distinct icon (`⊞`); selecting one and pressing `f` applies a filter whose page
+  set is **empty (0 pages)** rather than being rejected.
 
 ---
 
@@ -36,15 +39,15 @@ The left navigation pane has three numbered sections (lazygit-style jump targets
 | Section       | Contents                                                        |
 |---------------|-----------------------------------------------------------------|
 | `[1] MAIN`    | Overview, DB Header                                             |
-| `[2] B-TREES` | All tables and indexes, merged. `▦` = table, `◈` = index.       |
+| `[2] B-TREES` | All tables and indexes, merged. `▦` = table, `◈` = index, `⊞` = virtual table (no b-tree). |
 | `[3] PAGES`   | Page list. Full `1..PageCount` when unfiltered; the selected b-tree's pages when filtered. |
 
 Notes:
 - The `B-TREES` section shows **icon + name only**. The root page is intentionally *not*
   shown here (it was visual noise); it appears in the middle detail pane (`root page N`)
   and the right summary (`Root: page N`).
-- The icon (`▦` / `◈`) also echoes into the middle detail pane title, the page title when a
-  page is open, and the footer filter token.
+- The icon (`▦` / `◈` / `⊞`) also echoes into the middle detail pane title, the page title
+  when a page is open, and the footer filter token.
 
 ### Row markers
 - **`>` (hollow)** — the cursor / current selection.
@@ -61,7 +64,7 @@ Notes:
 | `1`        | anywhere in nav                  | Jump selection to first item of `MAIN`              |
 | `2`        | anywhere in nav                  | Jump selection to first item of `B-TREES`           |
 | `3`        | anywhere in nav                  | Jump selection to first item of `PAGES`             |
-| `f`        | a table/index row selected       | Apply filter: scope `PAGES` to that b-tree          |
+| `f`        | a `B-TREES` row selected         | Apply filter: scope `PAGES` to that object's b-tree (empty for a virtual table) |
 | `F`        | filter active                    | Clear the filter                                    |
 | `esc`      | filter active                    | Clear the filter (same as `F`)                      |
 | `enter`    | any nav row                      | Open the selected object/page in the explorer       |
@@ -168,19 +171,23 @@ Cursor `>` moves to a page row; the source row keeps the solid `▶`.
  ⦿ filtered: ◈ idx_companies_country (68 pg) | F clear | 1 main · 2 b-trees · 3 pages | q quit
 ```
 
-### 4.5 Filtered page set not yet ready
+### 4.5 Selected object not yet indexed
 
-If the filtered page set for the selected object is not immediately available, `PAGES`
-shows a transient loading state until it is ready, then repopulates:
-
-```
-│ [3] PAGES               │   ⟳ preparing companies…                                     │
-```
-
-Footer while the set is being prepared:
+The b-tree index is built eagerly at launch (Ticket 02), so by the time the user navigates
+to an object it is almost always ready. In the rare case the user presses `f` before that
+object's walk has finished, the filter is **not** applied; the footer shows a status asking
+them to retry. There is no auto-applying spinner — the user simply presses `f` again once
+indexing is done.
 
 ```
- ⟳ preparing ▦ companies… | 1 main · 2 b-trees · 3 pages | q quit
+ still indexing ▦ companies… try again in a moment | 1 main · 2 b-trees · 3 pages | q quit
+```
+
+If the object's walk hard-failed during indexing, `f` reports that instead and stays
+unfiltered:
+
+```
+ ⚠ can't filter ▦ companies: <reason> | 1 main · 2 b-trees · 3 pages | q quit
 ```
 
 ### 4.6 Degraded filter (unreadable pages)
@@ -193,6 +200,26 @@ still populates with what is available.
  ⦿ filtered: ▦ companies (1841 pg · 1 skipped) | ⚠ page 774 unreadable | F clear | q quit
 ```
 
+### 4.7 Filter ON by virtual table — zero pages
+
+A virtual table (or view) has no b-tree of its own (`rootpage 0`). It still appears in
+`B-TREES` with the `⊞` icon and can be filtered; the resulting page set is simply empty.
+`PAGES` shows nothing and the footer reports `0 pg`. This is a valid filtered state, not an
+error.
+
+```
+┌─ Navigation ───────────┬─ fts_docs ───────────────────────┬─ Selected: fts_docs ───────┐
+│ [2] B-TREES             │ ⊞ VIRTUAL  fts_docs               │ SUMMARY                     │
+│   ▦ companies           │ no b-tree (rootpage 0)            │ Type:     virtual table     │
+│ ▶ ⊞ fts_docs            │                                   │ Root:     —                 │
+│   ◈ idx_companies_…     │                                   │ Pages:    0 (filtered)      │
+│                         │                                   │                             │
+│ [3] PAGES               │                                   │ ACTIONS                     │
+│   (no pages)            │                                   │ - F / esc  clear filter     │
+└─────────────────────────┴───────────────────────────────────┴─────────────────────────────┘
+ ⦿ filtered: ⊞ fts_docs (0 pg) | F clear | 1 main · 2 b-trees · 3 pages | q quit
+```
+
 ---
 
 ## 5. User flows
@@ -200,7 +227,8 @@ still populates with what is available.
 ### Flow A — Apply a filter
 1. User opens nav (or presses `2` to jump to `B-TREES`).
 2. User moves to a table or index row.
-3. User presses `f`. (A brief loading state may show first if the set isn't ready, 4.5.)
+3. User presses `f`. (If that object is not yet indexed, the filter is not applied and a
+   retry status shows instead — see §4.5. A virtual table applies with an empty set — §4.7.)
 4. Once applied:
    - `PAGES` is scoped to the object's page set.
    - The source row shows the solid `▶`.
@@ -234,10 +262,18 @@ computed:
 - **No overflow pages.** Large-payload overflow chains are not part of the filtered set.
 - **Indexes are filtered independently.** Filtering a table does *not* pull in the pages of
   its indexes; an index is selected and filtered as its own object.
+- **Virtual tables / views have no b-tree.** Filtering one yields an empty page set
+  (0 pages); it is a valid filter, not an error.
 
 ---
 
 ## 7. Open / deferred items
-- Exact glyphs (`▦` / `◈`) are placeholders; confirm they render well in target terminals.
-  Fallback: `[T]` / `[I]`.
+- Exact glyphs (`▦` / `◈` / `⊞`) are placeholders; confirm they render well in target
+  terminals. Fallback: `[T]` / `[I]` / `[V]`.
 - Whether to persist the last-used filter across app restarts (currently: no).
+
+### Reconciliations folded in
+- **§4.5** changed from a self-resolving "⟳ preparing…" spinner to a "still indexing… try
+  again" status. Because Ticket 02 builds the index eagerly at launch and Ticket 03 drops
+  the pending-filter idea, `f` on a not-yet-indexed object reports a retry status rather
+  than queuing an auto-apply — filtering never triggers a walk.

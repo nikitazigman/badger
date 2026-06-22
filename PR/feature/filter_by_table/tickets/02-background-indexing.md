@@ -20,7 +20,7 @@ file-serializable for later on-disk persistence (out of scope here).
 ## Summary
 
 Ticket 01 shipped the pure primitive `(*Inspector).PagesForRoot(root) (PageWalk, error)`.
-This ticket is the **bridge** between that primitive and the filter UI (Tickets 03–06): it
+This ticket is the **bridge** between that primitive and the filter UI (Ticket 03): it
 runs the walk for *every* b-tree root once, at startup, in parallel, and accumulates the
 results into a model-held index. With the whole index built up-front, applying a filter
 later (Ticket 03) is an instant map lookup rather than an async walk.
@@ -57,7 +57,7 @@ In scope:
 - Unit tests for root collection, the command, and the `Update` reduction.
 
 Out of scope (later tickets / explicitly cut):
-- Any filter state, `f`/`F`/`esc` bindings, or `B-TREES`/`PAGES` rendering (Tickets 03–06).
+- Any filter state, `f`/`F`/`esc` bindings, or `B-TREES`/`PAGES` rendering (Ticket 03).
 - Any `page → owner` reverse mapping — the feature filters in one direction only
   (object → its pages); it is never built.
 - On-disk persistence of the index (the type is *shaped* to allow it; no Save/Load here).
@@ -187,7 +187,7 @@ stays serialization-friendly and consistent with `PageWalk.Skipped.Reason`.
        } else {
            m.pageIndex.Set(msg.walk)
        }
-       // Transient status only; the polished footer token is Ticket 06.
+       // Transient status only; the polished footer token is Ticket 03.
        if m.indexPending == 0 {
            m.status = indexCompleteStatus(m) // e.g. "indexed 14 b-trees (1 failed)"
        }
@@ -198,7 +198,7 @@ stays serialization-friendly and consistent with `PageWalk.Skipped.Reason`.
    `buildNavItems`, dedupes via a `seen` set and skips `0`.
 
 Status during indexing is intentionally minimal here (a one-line `indexing… N/M` /
-completion string is fine); the real footer treatment lands in Ticket 06.
+completion string is fine); the real footer treatment lands in Ticket 03.
 
 ---
 
@@ -237,7 +237,7 @@ These should be reconciled into `design.md` when Ticket 03 (filter state) is pic
 - [x] `indexPending` reaches `0` exactly when `indexTotal` messages have been processed.
 - [x] The walk runs off the UI goroutine: `Init` returns commands; no `PagesForRoot` call
       happens on the `Update`/`View` path.
-- [x] No filter UI, key bindings, or PAGES-list changes (kept for Tickets 03–06).
+- [x] No filter UI, key bindings, or PAGES-list changes (kept for Ticket 03).
 - [x] `go vet ./...` clean; existing tests still pass.
 
 ---
@@ -276,6 +276,6 @@ becomes `pageIndex.Pages(object.RootPage)` — an instant lookup, no async walk.
 also handle the **not-yet-indexed** edge (a filter applied before that root's
 `btreeIndexedMsg` arrives): either disable `f` until `indexPending == 0`, or fall back to a
 one-off `indexBTreeCmd`. `indexErrors` / `PageWalk.Skipped` carry the diagnostics that the
-Ticket 06 footer (`⚠ page N unreadable`, `n skipped`) will render. The index is used in one
+Ticket 03 footer (`⚠ page N unreadable`, `n skipped`) will render. The index is used in one
 direction only — object root → its pages; there is no `page → owner` reverse lookup
 anywhere in the feature.
