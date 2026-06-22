@@ -57,6 +57,11 @@ type model struct {
 	status          string
 	loading         bool
 	err             error
+	pageIndex       sqlite.PageIndex  // root → PageWalk (ready entries only)
+	indexRoots      []uint32          // unique, non-zero roots dispatched at launch
+	indexErrors     map[uint32]string // root → hard-failure reason (transient; NOT serialized)
+	indexPending    int               // roots still being walked (indexTotal → 0)
+	indexTotal      int               // total roots dispatched
 }
 
 func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) (model, error) {
@@ -64,6 +69,8 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 	if err != nil {
 		return model{}, err
 	}
+
+	indexRoots := collectBTreeRoots(db)
 
 	return model{
 		inspector:     inspector,
@@ -75,11 +82,23 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 		height:        34,
 		status:        "tab focus | up/down move | enter open | g overview | h header | p pages | [ ] page | q quit",
 		selectedIndex: 0,
+		pageIndex:     sqlite.NewPageIndex(),
+		indexRoots:    indexRoots,
+		indexErrors:   map[uint32]string{},
+		indexPending:  len(indexRoots),
+		indexTotal:    len(indexRoots),
 	}, nil
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	if len(m.indexRoots) == 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, len(m.indexRoots))
+	for _, root := range m.indexRoots {
+		cmds = append(cmds, indexBTreeCmd(m.inspector, root))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -97,6 +116,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inspectorScroll = 0
 		m.loading = false
 		m.status = fmt.Sprintf("opened page %d", msg.page.PageNumber)
+		return m, nil
+	case btreeIndexedMsg:
+		if m.indexPending > 0 {
+			m.indexPending--
+		}
+		if msg.err != nil {
+			m.indexErrors[msg.root] = msg.err.Error()
+		} else {
+			m.pageIndex.Set(msg.walk)
+		}
+		// Transient status only; the polished footer token is Ticket 06.
+		if m.indexPending == 0 {
+			m.status = indexCompleteStatus(m)
+		}
 		return m, nil
 	case errMsg:
 		m.loading = false
@@ -860,6 +893,38 @@ func buildNavItems(db databaseViewModel) []navItem {
 	}
 
 	return items
+}
+
+// collectBTreeRoots returns the unique, non-zero b-tree root pages across the database's
+// tables and indexes. A root belongs to exactly one object, but it dedupes defensively;
+// RootPage == 0 (views / virtual tables, which have no b-tree) is skipped.
+func collectBTreeRoots(db databaseViewModel) []uint32 {
+	seen := make(map[uint32]bool)
+	roots := make([]uint32, 0, len(db.Tables)+len(db.Indexes))
+
+	collect := func(objects []schemaObjectViewModel) {
+		for _, obj := range objects {
+			if obj.RootPage == 0 || seen[obj.RootPage] {
+				continue
+			}
+			seen[obj.RootPage] = true
+			roots = append(roots, obj.RootPage)
+		}
+	}
+
+	collect(db.Tables)
+	collect(db.Indexes)
+	return roots
+}
+
+// indexCompleteStatus is the transient one-line status shown once every root has been
+// walked. The polished footer treatment lands in Ticket 06.
+func indexCompleteStatus(m model) string {
+	indexed := len(m.indexRoots) - len(m.indexErrors)
+	if len(m.indexErrors) == 0 {
+		return fmt.Sprintf("indexed %d b-trees", indexed)
+	}
+	return fmt.Sprintf("indexed %d b-trees (%d failed)", indexed, len(m.indexErrors))
 }
 
 func sectionForNavItem(item navItem) string {

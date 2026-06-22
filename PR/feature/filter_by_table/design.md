@@ -4,8 +4,8 @@
 > Status: **Design agreed.** No implementation yet.
 > Companion docs: `context.md`, `codebase-map.md`, `feature-notes.md`.
 
-This document specifies the UX and the supporting data-layer capability for filtering
-the page list down to the pages belonging to a single table or index b-tree.
+This document specifies the UX for filtering the page list down to the pages belonging to
+a single table or index b-tree.
 
 ---
 
@@ -132,7 +132,7 @@ Cursor `>` moves to a page row; the source row keeps the solid `▶`.
 ```
 ┌─ Navigation ───────────┬─ page 9 ─────────────────────────┬─ Selected: page 9 ─────────┐
 │ [1] MAIN                │ ▦ PAGE 9  leaf table b-tree       │ SUMMARY                     │
-│   Overview              │ part of: companies                │ Page kind: leaf table       │
+│   Overview              │                                   │ Page kind: leaf table       │
 │   DB Header             │                                   │ Cells:     31               │
 │                         │ Page Header        offset 0..8    │ Right ptr: —                │
 │ [2] B-TREES             │ Cell Pointers      offset 8..70   │                             │
@@ -168,25 +168,26 @@ Cursor `>` moves to a page row; the source row keeps the solid `▶`.
  ⦿ filtered: ◈ idx_companies_country (68 pg) | F clear | 1 main · 2 b-trees · 3 pages | q quit
 ```
 
-### 4.5 Walk in progress (async, large b-tree)
+### 4.5 Filtered page set not yet ready
 
-Applying a filter reads many pages, so the walk is async. A transient state shows progress
-before `PAGES` repopulates:
-
-```
-│ [3] PAGES               │   ⟳ filtering companies… walked 612 / ~1900 pages            │
-```
-
-Footer during the walk:
+If the filtered page set for the selected object is not immediately available, `PAGES`
+shows a transient loading state until it is ready, then repopulates:
 
 ```
- ⟳ filtering ▦ companies… | esc cancel | 1 main · 2 b-trees · 3 pages | q quit
+│ [3] PAGES               │   ⟳ preparing companies…                                     │
 ```
 
-### 4.6 Degraded walk (unreadable child page)
+Footer while the set is being prepared:
 
-If a child page fails to parse, the walk skips it and surfaces the fact instead of crashing
-the workspace. The `PAGES` list still populates with what was reachable.
+```
+ ⟳ preparing ▦ companies… | 1 main · 2 b-trees · 3 pages | q quit
+```
+
+### 4.6 Degraded filter (unreadable pages)
+
+If some of an object's pages can't be read, the filter still applies with the pages that
+could be read, and surfaces the gap instead of failing the workspace. The `PAGES` list
+still populates with what is available.
 
 ```
  ⦿ filtered: ▦ companies (1841 pg · 1 skipped) | ⚠ page 774 unreadable | F clear | q quit
@@ -199,9 +200,9 @@ the workspace. The `PAGES` list still populates with what was reachable.
 ### Flow A — Apply a filter
 1. User opens nav (or presses `2` to jump to `B-TREES`).
 2. User moves to a table or index row.
-3. User presses `f`.
-4. The b-tree walk runs async (4.5). On completion:
-   - `PAGES` is scoped to the walked page set.
+3. User presses `f`. (A brief loading state may show first if the set isn't ready, 4.5.)
+4. Once applied:
+   - `PAGES` is scoped to the object's page set.
    - The source row shows the solid `▶`.
    - The footer shows `⦿ filtered: <icon> <name> (<n> pg) | F clear`.
    - The middle/summary panes show `Pages: <n> (filtered)`.
@@ -214,66 +215,29 @@ the workspace. The `PAGES` list still populates with what was reachable.
 ### Flow C — Switch the filter to a different object
 1. User presses `2` (or navigates) to `B-TREES`.
 2. User selects a different table/index and presses `f`.
-3. The previous filter is replaced (single-filter rule); a new walk runs; the solid `▶`
-   moves to the new source row.
+3. The previous filter is replaced (single-filter rule); `PAGES` re-scopes to the new
+   object and the solid `▶` moves to the new source row.
 
 ### Flow D — Clear the filter
 1. From anywhere, user presses `F` (or `esc` while a filter is active).
 2. `PAGES` returns to the full `1..PageCount` list.
 3. The footer filter token disappears; the `▶` marker reverts to a plain cursor.
 
-### Flow E — Cancel an in-progress walk
-1. During the async walk (4.5), user presses `esc`.
-2. The walk is abandoned; the prior page list (filtered or full) is restored.
+---
+
+## 6. Scope of the filter
+
+What "the pages of an object" means is a product decision, independent of how the set is
+computed:
+
+- **B-tree only.** The interior + leaf pages reachable from the object's own root page.
+- **No overflow pages.** Large-payload overflow chains are not part of the filtered set.
+- **Indexes are filtered independently.** Filtering a table does *not* pull in the pages of
+  its indexes; an index is selected and filtered as its own object.
 
 ---
 
-## 6. Supporting data-layer capability
-
-The only genuinely new capability is **rootpage → set-of-pages traversal**. It composes
-from primitives that already exist (`InspectPage`, interior `LeftChildPage`,
-`PageHeader.RightMostPointer`).
-
-- **Home:** a new method on `sqlite.Inspector` (data layer), e.g.
-  `PagesForRoot(root uint32) ([]uint32, error)` returning sorted page numbers. Keeping the
-  walk in the parser layer matches the project's design-doc guidance.
-- **Walk:** BFS/DFS from `root`. At interior pages, follow every interior cell's
-  `LeftChildPage` plus the header's `RightMostPointer`. Leaf pages are terminal.
-- **Cycle safety:** a `visited` set guards against malformed/cyclic child pointers
-  (mirrors the existing `parseFreeblocks` cycle guard).
-- **Degrade, don't crash:** a child that fails to parse is skipped and reported (count +
-  page number), consistent with the "stay navigable on partial parse" requirement (4.6).
-- **Lazy + cached:** walk on first filter-apply; memoize per root page
-  (`map[rootpage][]uint32`). The DB is read-only, so cached results are stable.
-- **Async:** invoked through the existing async command pattern (like `loadPageCmd`) so the
-  UI stays responsive on large trees, emitting a completion message that repopulates `PAGES`.
-
-### Explicitly out of scope (per product decisions)
-- Overflow-page chains (no overflow walking).
-- Pulling a table's indexes into its filter (indexes are filtered independently).
-
-`PagesForRoot` is the natural extension point if either is wanted later (e.g. an
-`includeOverflow` flag or a sibling method).
-
----
-
-## 7. Model state (conceptual)
-
-The TUI model gains a single filter concept (one active filter at most):
-
-- whether a filter is active,
-- the source object (icon/type + name + root page),
-- the cached filtered page numbers,
-- any skipped-page diagnostics from the walk.
-
-`buildNavItems` becomes filter-aware: the `PAGES` section iterates the filtered page set
-when a filter is active, otherwise the full `1..PageCount` range. The `MAIN` and `B-TREES`
-sections are unaffected, so the user can always pick a different object to re-filter.
-
----
-
-## 8. Open / deferred items
+## 7. Open / deferred items
 - Exact glyphs (`▦` / `◈`) are placeholders; confirm they render well in target terminals.
   Fallback: `[T]` / `[I]`.
-- Progress granularity for the async walk (4.5) — exact vs approximate page count.
 - Whether to persist the last-used filter across app restarts (currently: no).
