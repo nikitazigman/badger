@@ -1,7 +1,7 @@
 # Ticket 03 — Filter end-to-end: state, merged B-TREES nav, `f`/`F`, and filter UI
 
 > Feature: **Filter Pages by Table or Index** (`feature/filter_by_table`)
-> Status: **📝 Drafted — ready for implementation.**
+> Status: **✅ Done.** See [results/03-filter-state.md](../results/03-filter-state.md).
 > Depends on: [Ticket 02](02-background-indexing.md) (`PageIndex`, `indexErrors`) — ✅ done (`edf55e0`).
 > Absorbs: the merged-B-TREES nav + filter-aware PAGES, the `f`/`F` apply/clear keys, and
 > all filter rendering (markers, footer token, `Pages: n (filtered)`). Only the section-jump
@@ -194,38 +194,38 @@ func (m model) filteredPages() ([]uint32, bool) {
 ## Acceptance criteria
 
 **State**
-- [ ] `filterSource`, `activeFilter`, `applyFilter`, `clearFilter`, `isFiltered`,
+- [x] `filterSource`, `activeFilter`, `applyFilter`, `clearFilter`, `isFiltered`,
       `filteredPages` exist with the behavior above.
-- [ ] Indexed object → `activeFilter` set, `filteredPages()` equals `pageIndex.Pages(root)`.
-- [ ] Virtual table (`RootPage == 0`) → `activeFilter` set, `filteredPages()` returns
+- [x] Indexed object → `activeFilter` set, `filteredPages()` equals `pageIndex.Pages(root)`.
+- [x] Virtual table (`RootPage == 0`) → `activeFilter` set, `filteredPages()` returns
       `([]uint32{}, true)`.
-- [ ] Hard-failed root → unfiltered, `can't filter …` status.
-- [ ] Not-yet-indexed root → unfiltered, `still indexing …` status.
-- [ ] Applying a second filter replaces the first; `clearFilter` returns to `(nil, false)`.
-- [ ] No pending-filter state; `btreeIndexedMsg` reducer unchanged.
+- [x] Hard-failed root → unfiltered, `can't filter …` status.
+- [x] Not-yet-indexed root → unfiltered, `still indexing …` status.
+- [x] Applying a second filter replaces the first; `clearFilter` returns to `(nil, false)`.
+- [x] No pending-filter state; `btreeIndexedMsg` reducer unchanged.
 
 **Nav**
-- [ ] One `B-TREES` section lists tables + indexes with `▦`/`◈`/`⊞` icons; no separate
+- [x] One `B-TREES` section lists tables + indexes with `▦`/`◈`/`⊞` icons; no separate
       `TABLES`/`INDEXES` headers remain.
-- [ ] When filtered, `PAGES` lists exactly `filteredPages()` (empty for a virtual table);
+- [x] When filtered, `PAGES` lists exactly `filteredPages()` (empty for a virtual table);
       when unfiltered, the full `1..PageCount`.
-- [ ] Applying keeps the cursor on the source row; clearing keeps it on that same row.
+- [x] Applying keeps the cursor on the source row; clearing keeps it on that same row.
 
 **Keys**
-- [ ] `f` on a `B-TREES` row applies the filter; `f` elsewhere is a no-op.
-- [ ] `F` clears the filter; no-op when unfiltered.
-- [ ] `[`/`]` step the filtered set when filtered and `1..PageCount` when not; clamp at ends.
-- [ ] `1`/`2`/`3` and `esc`-clear are **not** wired (left for the follow-up).
+- [x] `f` on a `B-TREES` row applies the filter; `f` elsewhere is a no-op.
+- [x] `F` clears the filter; no-op when unfiltered.
+- [x] `[`/`]` step the filtered set when filtered and `1..PageCount` when not; clamp at ends.
+- [x] `1`/`2`/`3` and `esc`-clear are **not** wired (left for the follow-up).
 
 **Render**
-- [ ] Cursor `>` vs source `▶`, merged to one `▶` when coincident; never two markers on a row.
-- [ ] Footer shows `⦿ filtered: <icon> <name> (<n> pg)` (+ `· k skipped` / `⚠ page N`) and
+- [x] Cursor `>` vs source `▶`, merged to one `▶` when coincident; never two markers on a row.
+- [x] Footer shows `⦿ filtered: <icon> <name> (<n> pg)` (+ `· k skipped` / `⚠ page N`) and
       `F clear` when filtered; normal footer otherwise.
-- [ ] Summary shows `Pages: n (filtered)` / `Pages: — (unfiltered)`; virtual table shows
+- [x] Summary shows `Pages: n (filtered)` / `Pages: — (unfiltered)`; virtual table shows
       `Root: —`, `Pages: 0 (filtered)`.
 
 **General**
-- [ ] `go vet ./...` clean; existing tests pass.
+- [x] `go vet ./...` clean; existing tests pass.
 
 ---
 
