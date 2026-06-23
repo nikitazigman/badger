@@ -3,11 +3,14 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nikitazigman/badger/internal/sqlite"
 )
+
+const loadingIndicatorDelay = 500 * time.Millisecond
 
 type pane int
 
@@ -33,6 +36,16 @@ type navItem struct {
 	subtitle   string
 	pageNumber uint32
 	schema     *schemaObjectViewModel
+}
+
+type loadingDelayElapsedMsg struct {
+	pageNumber uint32
+}
+
+func showLoadingAfterDelayCmd(pageNumber uint32) tea.Cmd {
+	return tea.Tick(loadingIndicatorDelay, func(time.Time) tea.Msg {
+		return loadingDelayElapsedMsg{pageNumber: pageNumber}
+	})
 }
 
 type contentTarget struct {
@@ -63,6 +76,7 @@ type model struct {
 	height          int
 	status          string
 	loading         bool
+	loadingVisible  bool
 	err             error
 	pageIndex       sqlite.PageIndex  // root → PageWalk (ready entries only)
 	indexRoots      []uint32          // unique, non-zero roots dispatched at launch
@@ -202,12 +216,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case pageLoadedMsg:
+		if msg.page == nil || m.active.kind != navPage || msg.page.PageNumber != m.active.pageNumber {
+			return m, nil
+		}
 		m.currentPage = msg.page
 		m.pageRows = buildPageRows(msg.page)
 		m.explorerIndex = 0
 		m.inspectorScroll = 0
 		m.loading = false
-		m.status = fmt.Sprintf("opened page %d", msg.page.PageNumber)
+		m.loadingVisible = false
+		return m, nil
+	case loadingDelayElapsedMsg:
+		if !m.loading || m.active.kind != navPage || msg.pageNumber != m.active.pageNumber {
+			return m, nil
+		}
+		m.loadingVisible = true
 		return m, nil
 	case btreeIndexedMsg:
 		if m.indexPending > 0 {
@@ -225,6 +248,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case errMsg:
 		m.loading = false
+		m.loadingVisible = false
 		m.err = msg.err
 		m.status = msg.err.Error()
 		return m, nil
@@ -244,25 +268,35 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focusedPane = (m.focusedPane + 2) % 3
 		return m, nil
 	case "1":
-		m.selectFirstBTreeRow() // first navTable, else first navIndex
+		if m.selectFirstBTreeRow() { // first navTable, else first navIndex
+			return m.activateSelected()
+		}
 		return m, nil
 	case "2":
-		m.selectFirstKind(navPage) // first PAGES row; select-only (was `p`)
+		if m.selectFirstKind(navPage) { // first PAGES row (was `p`)
+			return m.activateSelected()
+		}
 		return m, nil
 	case "f":
 		item := m.selectedItem()
 		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
 			m.applyFilter(*item.schema)
+			return m.activateSelected()
 		}
 		return m, nil
 	case "F":
+		if !m.isFiltered() {
+			return m, nil
+		}
 		m.clearFilter()
-		return m, nil
+		return m.activateSelected()
 	case "enter":
-		return m.openSelected()
+		return m.activateSelected()
 	case "up", "k":
 		if m.focusedPane == navPane {
-			m.moveSelection(-1)
+			if m.moveSelection(-1) {
+				return m.activateSelected()
+			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveExplorerSelection(-1)
 		} else if m.focusedPane == inspectorPane {
@@ -271,7 +305,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "down", "j":
 		if m.focusedPane == navPane {
-			m.moveSelection(1)
+			if m.moveSelection(1) {
+				return m.activateSelected()
+			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveExplorerSelection(1)
 		} else if m.focusedPane == inspectorPane {
@@ -306,6 +342,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.explorerIndex = 0
 		m.loading = false
+		m.loadingVisible = false
 		m.inspectorScroll = 0
 		m.status = "reset page selection"
 		return m, nil
@@ -314,37 +351,48 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) moveSelection(delta int) {
+func (m *model) moveSelection(delta int) bool {
 	next := m.selectedIndex + delta
 	if next < 0 || next >= len(m.navItems) {
-		return
+		return false
 	}
 	// Arrows stay within the current section; 1/2/3 cross sections.
 	if sectionForNavItem(m.navItems[next]) != sectionForNavItem(m.navItems[m.selectedIndex]) {
-		return
+		return false
 	}
 	m.selectedIndex = next
 	m.inspectorScroll = 0
+	return true
 }
 
-func (m *model) selectFirstKind(kind navKind) {
+func (m *model) selectFirstKind(kind navKind) bool {
 	for idx, item := range m.navItems {
 		if item.kind == kind {
+			if m.selectedIndex == idx {
+				return false
+			}
 			m.selectedIndex = idx
-			return
+			m.inspectorScroll = 0
+			return true
 		}
 	}
+	return false
 }
 
 // selectFirstBTreeRow jumps to the first row of the merged B-TREES section: the first
 // table, or the first index when the database has no tables.
-func (m *model) selectFirstBTreeRow() {
+func (m *model) selectFirstBTreeRow() bool {
 	for idx, item := range m.navItems {
 		if item.kind == navTable || item.kind == navIndex {
+			if m.selectedIndex == idx {
+				return false
+			}
 			m.selectedIndex = idx
-			return
+			m.inspectorScroll = 0
+			return true
 		}
 	}
+	return false
 }
 
 func (m *model) moveExplorerSelection(delta int) {
@@ -372,12 +420,14 @@ func (m *model) scrollInspector(direction int, amount int) {
 	}
 }
 
-func (m model) openSelected() (tea.Model, tea.Cmd) {
+func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	item := m.selectedItem()
 	m.active = contentTarget{
 		kind: item.kind,
 	}
 	m.err = nil
+	m.loading = false
+	m.loadingVisible = false
 
 	switch item.kind {
 	case navOverview:
@@ -404,14 +454,21 @@ func (m model) openSelected() (tea.Model, tea.Cmd) {
 	case navPage:
 		m.active.pageNumber = item.pageNumber
 		m.explorerIndex = 0
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		m.loading = true
-		m.status = fmt.Sprintf("loading page %d", item.pageNumber)
-		return m, loadPageCmd(m.inspector, item.pageNumber)
+		m.loadingVisible = false
+		m.status = ""
+		return m, tea.Batch(
+			loadPageCmd(m.inspector, item.pageNumber),
+			showLoadingAfterDelayCmd(item.pageNumber),
+		)
 	default:
 		return m, nil
 	}
+}
+
+func (m model) openSelected() (tea.Model, tea.Cmd) {
+	return m.activateSelected()
 }
 
 func (m model) View() string {
@@ -436,8 +493,8 @@ func (m model) View() string {
 // Persistent key-hint bars. The hints are always visible in the footer; the contextual
 // segment (a transient status, or the filter token while filtered) is prepended to them.
 const (
-	navKeys    = "tab focus · ↑↓ move · enter open · f filter · q quit"
-	filterKeys = "F clear · tab focus · enter open · q quit"
+	navKeys    = "tab focus · ↑↓ inspect · f filter · q quit"
+	filterKeys = "F clear · tab focus · ↑↓ inspect · q quit"
 )
 
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
@@ -496,7 +553,6 @@ func (m model) selectedPageRow() *pageRowViewModel {
 
 func (m model) viewNavigation(width int, height int) string {
 	rows := make([]string, 0, len(m.navItems)+8)
-	selected := m.selectedItem()
 
 	rows = append(rows, titleStyle.Render("Navigation"))
 	rows = append(rows, "")
@@ -517,10 +573,6 @@ func (m model) viewNavigation(width int, height int) string {
 			lineStyle = selectedNavItemStyle
 		}
 		rows = append(rows, renderNavLine(lineStyle, width, m.navMarker(row.index), row.text))
-	}
-
-	if selected.kind == navPage && m.loading {
-		rows = append(rows, "", mutedStyle.Render("Loading page..."))
 	}
 
 	return fitVertical(rows, height)
@@ -656,7 +708,7 @@ func (m model) viewOverview(width int) []string {
 		lines = append(lines, mutedStyle.Render("No indexes"))
 	}
 
-	lines = append(lines, "", mutedStyle.Render("Press enter to open the selected item from navigation."))
+	lines = append(lines, "", mutedStyle.Render("Move through navigation to inspect items."))
 	return wrapLines(lines, width)
 }
 
@@ -710,6 +762,11 @@ func (m model) viewSchemaObject(width int) []string {
 
 func (m model) viewPage(width int) []string {
 	item := m.selectedItem()
+	pageNumber := item.pageNumber
+	preservingLoadedPage := m.loading && !m.loadingVisible && m.currentPage != nil
+	if preservingLoadedPage {
+		pageNumber = m.currentPage.PageNumber
+	}
 	pageTitle := "Page"
 	if m.isFiltered() {
 		pageTitle = objectIcon(m.activeFilter.object) + " Page"
@@ -717,19 +774,24 @@ func (m model) viewPage(width int) []string {
 	lines := []string{
 		titleStyle.Render(pageTitle),
 		"",
-		fmt.Sprintf("Page number: %d", item.pageNumber),
+		fmt.Sprintf("Page number: %d", pageNumber),
 	}
-	if item.pageNumber == 1 {
+	if pageNumber == 1 {
 		lines = append(lines, "Bytes 0-99 are the database header before the b-tree page content.")
 	}
 
 	if m.loading {
-		lines = append(lines, "", "Loading page details...")
-		return wrapLines(lines, width)
+		if !m.loadingVisible && !preservingLoadedPage {
+			return wrapLines(lines, width)
+		}
+		if m.loadingVisible {
+			lines = append(lines, "", "Loading page details...")
+			return wrapLines(lines, width)
+		}
 	}
 
-	if m.currentPage == nil || m.currentPage.PageNumber != item.pageNumber {
-		lines = append(lines, "", "Press enter to load this page.")
+	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+		lines = append(lines, "", "Waiting for page details...")
 		return wrapLines(lines, width)
 	}
 
@@ -828,9 +890,9 @@ func (m model) viewInspector(width int, height int) string {
 			}
 			lines = append(lines, "", sectionStyle.Render("ACTIONS"))
 			if m.objectIsFilterSource(obj) {
-				lines = append(lines, "- F        clear filter", "- enter    open object")
+				lines = append(lines, "- F        clear filter")
 			} else {
-				lines = append(lines, "- f        filter pages to this b-tree", "- enter    open object")
+				lines = append(lines, "- f        filter pages to this b-tree")
 			}
 		}
 	case navPage:
@@ -854,7 +916,7 @@ func (m model) viewInspector(width int, height int) string {
 		lines = append(lines,
 			"",
 			sectionStyle.Render("ACTIONS"),
-			"- enter to load page",
+			"- move in navigation to load pages",
 			"- [ previous page",
 			"- ] next page",
 		)
@@ -869,14 +931,20 @@ func (m model) viewInspector(width int, height int) string {
 
 func (m model) viewPageInspector(width int) string {
 	item := m.selectedItem()
+	pageNumber := item.pageNumber
+	if m.loading && !m.loadingVisible && m.currentPage != nil {
+		pageNumber = m.currentPage.PageNumber
+	}
 	lines := []string{
 		titleStyle.Render("Inspector"),
 		"",
-		fmt.Sprintf("Selected: page %d", item.pageNumber),
+		fmt.Sprintf("Page: %d", pageNumber),
 	}
 
-	if m.currentPage == nil || m.currentPage.PageNumber != item.pageNumber {
-		lines = append(lines, "", "Load the page to inspect its structures.")
+	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+		if m.loadingVisible {
+			lines = append(lines, "", "Page details are loading.")
+		}
 		return strings.Join(lines, "\n")
 	}
 
@@ -887,8 +955,8 @@ func (m model) viewPageInspector(width int) string {
 	}
 
 	pageSize := m.pageSizeForCurrentPage()
-	fileStart := row.Meta.FileStartOffset(item.pageNumber, pageSize)
-	fileEndExclusive := row.Meta.FileEndOffset(item.pageNumber, pageSize)
+	fileStart := row.Meta.FileStartOffset(pageNumber, pageSize)
+	fileEndExclusive := row.Meta.FileEndOffset(pageNumber, pageSize)
 	fileEnd := fileEndExclusive
 	if row.Meta.Size > 0 {
 		fileEnd = fileEndExclusive - 1

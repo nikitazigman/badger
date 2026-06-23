@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/nikitazigman/badger/internal/sqlite"
 )
 
 // firstIndexOfKind returns the navItems index of the first row of the given kind, or -1.
@@ -18,7 +19,26 @@ func firstIndexOfKind(items []navItem, kind navKind) int {
 	return -1
 }
 
-func TestSectionJumpsSelectOnly(t *testing.T) {
+func pageLoadedFromCmd(t *testing.T, cmd tea.Cmd) pageLoadedMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("cmd is nil")
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		if len(batch) == 0 {
+			t.Fatal("batch command has no children")
+		}
+		msg = batch[0]()
+	}
+	loaded, ok := msg.(pageLoadedMsg)
+	if !ok {
+		t.Fatalf("cmd produced %T, want pageLoadedMsg", msg)
+	}
+	return loaded
+}
+
+func TestSectionJumpsAutoActivate(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
@@ -27,7 +47,6 @@ func TestSectionJumpsSelectOnly(t *testing.T) {
 	// Start from an arbitrary selection outside B-TREES.
 	m.selectFirstKind(navPage)
 	m.active = contentTarget{kind: navPage}
-	before := m.active
 
 	// 1 → first B-TREES row.
 	next, _ := m.Update(keyMsg("1"))
@@ -35,18 +54,57 @@ func TestSectionJumpsSelectOnly(t *testing.T) {
 	if want := got.indexOfFirstBTree(); got.selectedIndex != want {
 		t.Fatalf("1 selected index %d, want first B-TREES row %d", got.selectedIndex, want)
 	}
-	if got.active != before {
-		t.Fatalf("1 changed m.active to %+v; jumps must be select-only", got.active)
+	if got.active.kind != got.selectedItem().kind || got.active.schemaName != got.selectedItem().schema.Name {
+		t.Fatalf("1 active target = %+v, selected item = %+v", got.active, got.selectedItem())
 	}
 
 	// 2 → first PAGES row.
-	next, _ = got.Update(keyMsg("2"))
+	next, cmd := got.Update(keyMsg("2"))
 	got = next.(model)
 	if want := firstIndexOfKind(got.navItems, navPage); got.selectedIndex != want {
 		t.Fatalf("2 selected index %d, want first navPage row %d", got.selectedIndex, want)
 	}
-	if got.active != before {
-		t.Fatalf("2 changed m.active to %+v; jumps must be select-only", got.active)
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("2 active target = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+	if !got.loading {
+		t.Fatal("2 did not start loading the selected page")
+	}
+	if got.loadingVisible {
+		t.Fatal("2 showed loading immediately; loading indicator must be delayed")
+	}
+	if got.status != "" {
+		t.Fatalf("2 status = %q, want no loading status before delay", got.status)
+	}
+	if cmd == nil {
+		t.Fatal("2 on a page row returned nil cmd, want batched load/delay command")
+	}
+	msg := pageLoadedFromCmd(t, cmd)
+	next, _ = got.Update(msg)
+	loaded := next.(model)
+	if loaded.loading {
+		t.Fatal("page load message left loading=true")
+	}
+	if loaded.loadingVisible {
+		t.Fatal("fast page load left loadingVisible=true")
+	}
+	if loaded.status != "" {
+		t.Fatalf("fast page load changed footer status to %q", loaded.status)
+	}
+	if loaded.currentPage == nil || loaded.currentPage.PageNumber != got.active.pageNumber {
+		t.Fatalf("loaded current page = %+v, want page %d", loaded.currentPage, got.active.pageNumber)
+	}
+	if len(loaded.pageRows) == 0 {
+		t.Fatal("loaded page did not build page rows")
+	}
+
+	next, _ = loaded.Update(loadingDelayElapsedMsg{pageNumber: got.active.pageNumber})
+	afterTimer := next.(model)
+	if afterTimer.loadingVisible {
+		t.Fatal("delay timer showed loading after the page had already loaded")
+	}
+	if afterTimer.footerLine() != loaded.footerLine() {
+		t.Fatalf("delay timer changed footer after load to %q, want %q", afterTimer.footerLine(), loaded.footerLine())
 	}
 }
 
@@ -188,6 +246,139 @@ func TestArrowsConfinedToSection(t *testing.T) {
 	}
 	if got.selectedIndex == firstBTree {
 		t.Fatal("↓ within B-TREES did not advance")
+	}
+}
+
+func TestNavMovementAutoActivatesBTreeRows(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	m.selectedIndex = m.indexOfFirstBTree()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	got := next.(model)
+	if cmd != nil {
+		t.Fatal("moving to a b-tree row returned a load command")
+	}
+	if got.active.kind != got.selectedItem().kind {
+		t.Fatalf("active kind = %v, selected kind = %v", got.active.kind, got.selectedItem().kind)
+	}
+	if got.selectedItem().schema == nil {
+		t.Fatal("setup: selected row is not a schema row")
+	}
+	if got.active.schemaName != got.selectedItem().schema.Name {
+		t.Fatalf("active schema = %q, want selected schema %q", got.active.schemaName, got.selectedItem().schema.Name)
+	}
+}
+
+func TestLoadingIndicatorAppearsAfterDelayOnly(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	got := next.(model)
+	if cmd == nil {
+		t.Fatal("page activation returned nil cmd")
+	}
+	if !got.loading {
+		t.Fatal("page activation did not set loading=true")
+	}
+	if got.loadingVisible {
+		t.Fatal("loading indicator is visible before the delay")
+	}
+	if strings.Contains(got.View(), "Loading page") || strings.Contains(got.View(), "Loading page details") {
+		t.Fatal("view shows loading copy before the delay elapses")
+	}
+
+	next, _ = got.Update(loadingDelayElapsedMsg{pageNumber: got.active.pageNumber})
+	delayed := next.(model)
+	if !delayed.loadingVisible {
+		t.Fatal("delay message did not reveal the loading indicator")
+	}
+	if delayed.status != "" {
+		t.Fatalf("delay message changed footer status to %q", delayed.status)
+	}
+	if !strings.Contains(delayed.View(), "Loading page") {
+		t.Fatal("view does not show loading copy after the delay elapses")
+	}
+	if strings.Contains(delayed.viewNavigation(24, 20), "Loading page") {
+		t.Fatal("navigation pane shows loading copy")
+	}
+
+	next, _ = got.Update(loadingDelayElapsedMsg{pageNumber: got.active.pageNumber + 1})
+	staleTimer := next.(model)
+	if staleTimer.loadingVisible {
+		t.Fatal("stale delay message revealed the loading indicator")
+	}
+}
+
+func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	firstLoading := next.(model)
+	next, _ = firstLoading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	if loaded.currentPage == nil {
+		t.Fatal("setup: first page did not load")
+	}
+	firstPage := loaded.currentPage.PageNumber
+
+	next, cmd = loaded.Update(tea.KeyMsg{Type: tea.KeyDown})
+	scrolling := next.(model)
+	if cmd == nil {
+		t.Fatal("moving to the next page did not start a load")
+	}
+	if !scrolling.loading {
+		t.Fatal("moving to the next page did not set loading=true")
+	}
+	if scrolling.loadingVisible {
+		t.Fatal("loading indicator is visible before the delay")
+	}
+	if scrolling.currentPage == nil || scrolling.currentPage.PageNumber != firstPage {
+		t.Fatalf("currentPage = %+v, want previous page %d preserved during delay", scrolling.currentPage, firstPage)
+	}
+
+	view := scrolling.View()
+	if !strings.Contains(view, "Page number: 1") {
+		t.Fatalf("view did not keep previous page visible during delay; want page %d", firstPage)
+	}
+	if !strings.Contains(view, "STRUCTURES") {
+		t.Fatal("view did not keep the previous page structure table visible during delay")
+	}
+	if strings.Contains(view, "Waiting for page details") || strings.Contains(view, "Loading page") {
+		t.Fatal("view showed loading/empty placeholder during the delay")
+	}
+}
+
+func TestStalePageLoadedMessageIgnored(t *testing.T) {
+	t.Parallel()
+
+	m, _ := newFixtureModel(t, "companies.db")
+	m.active = contentTarget{kind: navPage, pageNumber: 2}
+	m.loading = true
+	m.status = "loading page 2"
+
+	next, cmd := m.Update(pageLoadedMsg{page: &sqlite.PageInspection{PageNumber: 1}})
+	got := next.(model)
+	if cmd != nil {
+		t.Fatal("stale pageLoadedMsg returned a command")
+	}
+	if got.currentPage != nil {
+		t.Fatalf("stale pageLoadedMsg set currentPage = %+v", got.currentPage)
+	}
+	if !got.loading {
+		t.Fatal("stale pageLoadedMsg cleared loading for the active page")
+	}
+	if got.status != "loading page 2" {
+		t.Fatalf("stale pageLoadedMsg changed status to %q", got.status)
 	}
 }
 
