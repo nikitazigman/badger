@@ -79,12 +79,13 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 	}
 
 	indexRoots := collectBTreeRoots(db)
+	navItems := buildNavItems(db, nil, nil)
 
 	return model{
 		inspector:     inspector,
 		db:            db,
-		navItems:      buildNavItems(db, nil, nil),
-		active:        contentTarget{kind: navOverview},
+		navItems:      navItems,
+		active:        initialContentTarget(navItems),
 		focusedPane:   navPane,
 		width:         120,
 		height:        34,
@@ -243,12 +244,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focusedPane = (m.focusedPane + 2) % 3
 		return m, nil
 	case "1":
-		m.selectFirstKind(navOverview) // first MAIN row; select-only
-		return m, nil
-	case "2":
 		m.selectFirstBTreeRow() // first navTable, else first navIndex
 		return m, nil
-	case "3":
+	case "2":
 		m.selectFirstKind(navPage) // first PAGES row; select-only (was `p`)
 		return m, nil
 	case "f":
@@ -306,11 +304,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "returned to page summary"
 			return m, nil
 		}
-		m.active = contentTarget{kind: navOverview}
-		m.currentPage = nil
-		m.pageRows = nil
+		m.explorerIndex = 0
+		m.loading = false
 		m.inspectorScroll = 0
-		m.status = "returned to overview"
+		m.status = "reset page selection"
 		return m, nil
 	}
 
@@ -479,7 +476,7 @@ func (m model) filterToken() string {
 
 func (m model) selectedItem() navItem {
 	if len(m.navItems) == 0 {
-		return navItem{kind: navOverview, title: "Overview"}
+		return navItem{kind: navPage, title: "page 1", pageNumber: 1}
 	}
 	if m.selectedIndex < 0 || m.selectedIndex >= len(m.navItems) {
 		return m.navItems[0]
@@ -519,7 +516,7 @@ func (m model) viewNavigation(width int, height int) string {
 		if row.index == m.selectedIndex {
 			lineStyle = selectedNavItemStyle
 		}
-		rows = append(rows, lineStyle.Width(width).Render(m.navMarker(row.index)+row.text))
+		rows = append(rows, renderNavLine(lineStyle, width, m.navMarker(row.index), row.text))
 	}
 
 	if selected.kind == navPage && m.loading {
@@ -527,6 +524,13 @@ func (m model) viewNavigation(width int, height int) string {
 	}
 
 	return fitVertical(rows, height)
+}
+
+func renderNavLine(style lipgloss.Style, width int, marker string, text string) string {
+	markerWidth := lipgloss.Width(marker)
+	textWidth := max(0, width-markerWidth)
+	line := marker + truncateCells(text, textWidth)
+	return style.Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, line))
 }
 
 // navMarker returns the two-cell row prefix: ▶ for the active filter source (it wins, so
@@ -568,7 +572,7 @@ func (m model) visibleNavItems(height int) []visibleNavRow {
 		}
 		text := item.title
 		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
-			text = objectIcon(*item.schema) + " " + item.title
+			text = navSchemaRowText(*item.schema)
 		} else if item.subtitle != "" {
 			text += "  " + mutedInline(item.subtitle)
 		}
@@ -687,10 +691,20 @@ func (m model) viewSchemaObject(width int) []string {
 		fmt.Sprintf("Name: %s", obj.Name),
 		fmt.Sprintf("Table: %s", obj.TableName),
 		rootLine,
-		"",
-		sectionStyle.Render("SQL"),
-		obj.SQL,
 	}
+	if obj.IsSystem {
+		lines = append(lines,
+			"System catalog",
+			"SQLite-created",
+			"Filtering shows all reachable catalog b-tree pages.",
+			"Page 1 stores the 100-byte database header before the b-tree payload.",
+			"",
+			sectionStyle.Render("SQL"),
+			"No stored SQL row for sqlite_schema itself.",
+		)
+		return wrapLines(lines, width)
+	}
+	lines = append(lines, "", sectionStyle.Render("SQL"), obj.SQL)
 	return wrapLines(lines, width)
 }
 
@@ -704,6 +718,9 @@ func (m model) viewPage(width int) []string {
 		titleStyle.Render(pageTitle),
 		"",
 		fmt.Sprintf("Page number: %d", item.pageNumber),
+	}
+	if item.pageNumber == 1 {
+		lines = append(lines, "Bytes 0-99 are the database header before the b-tree page content.")
 	}
 
 	if m.loading {
@@ -801,9 +818,15 @@ func (m model) viewInspector(width int, height int) string {
 				rootLine,
 				m.pagesSummaryLine(obj),
 				fmt.Sprintf("Table:     %s", obj.TableName),
-				"",
-				sectionStyle.Render("ACTIONS"),
 			)
+			if obj.IsSystem {
+				lines = append(lines,
+					"Catalog:   System catalog",
+					"Managed:   SQLite-created",
+					"Page 1:    database header, then catalog b-tree payload",
+				)
+			}
+			lines = append(lines, "", sectionStyle.Render("ACTIONS"))
 			if m.objectIsFilterSource(obj) {
 				lines = append(lines, "- F        clear filter", "- enter    open object")
 			} else {
@@ -817,6 +840,9 @@ func (m model) viewInspector(width int, height int) string {
 			fmt.Sprintf("Page number: %d", item.pageNumber),
 			fmt.Sprintf("File offset: %d", (item.pageNumber-1)*m.db.PageSize),
 		)
+		if item.pageNumber == 1 {
+			lines = append(lines, "Bytes 0-99: SQLite database header before b-tree content")
+		}
 		if m.currentPage != nil && m.currentPage.PageNumber == item.pageNumber {
 			header := m.currentPage.BTreePage.PageHeader
 			lines = append(lines,
@@ -1031,10 +1057,7 @@ var (
 // table) and the full 1..PageCount otherwise. The root page is intentionally not shown on
 // B-TREES rows (it lives in the detail / summary panes — design §2).
 func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []uint32) []navItem {
-	items := []navItem{
-		{kind: navOverview, title: "Overview"},
-		{kind: navDBHeader, title: "DB Header"},
-	}
+	items := []navItem{}
 
 	for _, table := range db.Tables {
 		table := table
@@ -1075,9 +1098,27 @@ func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []u
 	return items
 }
 
-// objectIcon maps a schema object to its B-TREES glyph: ◈ index, ⊞ virtual table / view
-// (no b-tree, RootPage == 0), ▦ ordinary table. Echoed in nav rows, detail/page titles,
-// and the footer filter token. Glyphs are placeholders pending terminal testing (design §7).
+func initialContentTarget(items []navItem) contentTarget {
+	if len(items) == 0 {
+		return contentTarget{kind: navPage, pageNumber: 1}
+	}
+	item := items[0]
+	target := contentTarget{kind: item.kind, pageNumber: item.pageNumber}
+	if item.schema != nil {
+		target.schemaName = item.schema.Name
+	}
+	return target
+}
+
+func navSchemaRowText(obj schemaObjectViewModel) string {
+	if obj.IsSystem {
+		return obj.Name
+	}
+	return objectIcon(obj) + " " + obj.Name
+}
+
+// objectIcon maps a schema object to its glyph: ◈ index, ⊞ virtual table / view (no
+// b-tree, RootPage == 0), ▦ ordinary table.
 func objectIcon(obj schemaObjectViewModel) string {
 	switch {
 	case obj.Type == "index":
@@ -1132,10 +1173,10 @@ func indexCompleteStatus(m model) string {
 	return fmt.Sprintf("indexed %d b-trees (%d failed)", indexed, len(m.indexErrors))
 }
 
-// sectionLabel renders a section header with its jump-key number prefix (e.g. "[1] MAIN"),
-// advertising the 1/2/3 section jumps inline. Sections without a jump key render bare.
+// sectionLabel renders a section header with its jump-key number prefix. Sections without
+// a jump key render bare.
 func sectionLabel(section string) string {
-	num := map[string]string{"Main": "1", "B-Trees": "2", "Pages": "3"}[section]
+	num := map[string]string{"B-Trees": "1", "Pages": "2"}[section]
 	if num == "" {
 		return strings.ToUpper(section)
 	}
@@ -1144,8 +1185,6 @@ func sectionLabel(section string) string {
 
 func sectionForNavItem(item navItem) string {
 	switch item.kind {
-	case navOverview, navDBHeader:
-		return "Main"
 	case navTable, navIndex:
 		return "B-Trees"
 	case navPage:
@@ -1169,11 +1208,7 @@ func fitVertical(lines []string, height int) string {
 func wrapLines(lines []string, width int) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
-			continue
-		}
-		out = append(out, lipgloss.NewStyle().Width(width).Render(line))
+		out = appendRenderedLines(out, line, width)
 	}
 	return out
 }
@@ -1181,27 +1216,43 @@ func wrapLines(lines []string, width int) []string {
 func wrapInspectorLines(lines []string, width int) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
-			continue
+		for _, segment := range strings.Split(line, "\n") {
+			out = appendInspectorLine(out, segment, width)
 		}
-		if strings.Contains(line, "\x1b[") {
-			out = append(out, lipgloss.NewStyle().Width(width).Render(line))
-			continue
-		}
-
-		runes := []rune(line)
-		for len(runes) > width && width > 0 {
-			out = append(out, string(runes[:width]))
-			runes = runes[width:]
-		}
-		if len(runes) == 0 {
-			out = append(out, "")
-			continue
-		}
-		out = append(out, string(runes))
 	}
 	return out
+}
+
+func appendRenderedLines(out []string, line string, width int) []string {
+	for _, segment := range strings.Split(line, "\n") {
+		if strings.TrimSpace(segment) == "" {
+			out = append(out, "")
+			continue
+		}
+		rendered := lipgloss.NewStyle().Width(width).Render(segment)
+		out = append(out, strings.Split(rendered, "\n")...)
+	}
+	return out
+}
+
+func appendInspectorLine(out []string, line string, width int) []string {
+	if strings.TrimSpace(line) == "" {
+		return append(out, "")
+	}
+	if strings.Contains(line, "\x1b[") {
+		rendered := lipgloss.NewStyle().Width(width).Render(line)
+		return append(out, strings.Split(rendered, "\n")...)
+	}
+
+	runes := []rune(line)
+	for len(runes) > width && width > 0 {
+		out = append(out, string(runes[:width]))
+		runes = runes[width:]
+	}
+	if len(runes) == 0 {
+		return append(out, "")
+	}
+	return append(out, string(runes))
 }
 
 func mutedInline(text string) string {
@@ -1252,4 +1303,37 @@ func truncateLine(text string, width int) string {
 		return string(runes[:width])
 	}
 	return string(runes[:width-1]) + "…"
+}
+
+func truncateCells(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	if width <= 1 {
+		for _, r := range text {
+			cellWidth := lipgloss.Width(string(r))
+			if cellWidth <= width {
+				return string(r)
+			}
+			return ""
+		}
+		return ""
+	}
+
+	var b strings.Builder
+	used := 0
+	ellipsisWidth := lipgloss.Width("…")
+	for _, r := range text {
+		cellWidth := lipgloss.Width(string(r))
+		if used+cellWidth+ellipsisWidth > width {
+			break
+		}
+		b.WriteRune(r)
+		used += cellWidth
+	}
+	b.WriteString("…")
+	return b.String()
 }

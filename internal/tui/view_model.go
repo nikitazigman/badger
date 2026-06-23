@@ -13,6 +13,7 @@ type schemaObjectViewModel struct {
 	TableName string
 	RootPage  uint32
 	SQL       string
+	IsSystem  bool
 }
 
 type labelValue struct {
@@ -51,6 +52,14 @@ func newDatabaseViewModel(metadata *sqlite.MetadataInspection) (databaseViewMode
 		HeaderRows:         buildHeaderRows(metadata.DBHeader),
 	}
 
+	db.Tables = append(db.Tables, schemaObjectViewModel{
+		Type:      "table",
+		Name:      "sqlite_schema",
+		TableName: "sqlite_schema",
+		RootPage:  1,
+		IsSystem:  true,
+	})
+
 	for _, row := range metadata.SchemaRecords {
 		object := schemaObjectViewModel{
 			Type:      stringValue(row["type"]),
@@ -58,6 +67,9 @@ func newDatabaseViewModel(metadata *sqlite.MetadataInspection) (databaseViewMode
 			TableName: stringValue(row["tbl_name"]),
 			RootPage:  uint32Value(row["rootpage"]),
 			SQL:       stringValue(row["sql"]),
+		}
+		if object.Name == "sqlite_schema" && object.Type == "table" {
+			continue
 		}
 		switch object.Type {
 		case "table":

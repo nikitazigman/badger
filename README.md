@@ -77,11 +77,11 @@ Badger opens directly into an interactive TUI.
 
 The interface has three panes:
 
-- Navigation: `[1] MAIN`, `[2] B-TREES`, and `[3] PAGES`.
-- Explorer: the currently selected view, such as database metadata, schema object details, or page structures.
+- Navigation: `[1] B-TREES` and `[2] PAGES`.
+- Explorer: the currently selected view, such as schema object details or page structures.
 - Inspector: contextual details for the selected item, including byte ranges, raw bytes, byte maps, decoded fields, and actions.
 
-The `B-TREES` section merges tables and indexes into one list. Tables use `▦`, indexes use `◈`, and root-page-zero objects use `⊞` because they do not have their own b-tree. The `PAGES` section shows every database page by default.
+The `B-TREES` section merges tables and indexes into one list. It starts with the SQLite-created `sqlite_schema` system catalog at root page 1. Tables use `▦`, indexes use `◈`, and root-page-zero objects use `⊞` because they do not have their own b-tree. The `PAGES` section shows every database page by default.
 
 In the page view, the Explorer pane lists page structures such as the page header, pointer array, free space, and cells. Selecting a row shows the related raw bytes and parsed byte map in the Inspector pane.
 
@@ -89,7 +89,7 @@ In the page view, the Explorer pane lists page structures such as the page heade
 
 Badger can scope the `PAGES` list to a single table or index b-tree.
 
-Move to a table or index in `[2] B-TREES` and press `f`. Badger filters `[3] PAGES` to the pages reachable from that object's root page, including interior and leaf b-tree pages. The active filter stays on until you clear it with `F` or `esc`, and the source row is marked with `▶`.
+Move to a table or index in `[1] B-TREES` and press `f`. Badger filters `[2] PAGES` to the pages reachable from that object's root page, including interior and leaf b-tree pages. The active filter stays on until you clear it with `F` or `esc`, and the source row is marked with `▶`.
 
 Filtering is read-only and backed by a b-tree page index built in the background when Badger starts. If indexing has not finished for the selected object, Badger asks you to retry in a moment. If some child pages cannot be parsed, Badger still applies the filter to the pages it could read and reports the skipped pages in the footer.
 
@@ -107,20 +107,19 @@ Keybindings:
 | `tab` | Switch focus between panes |
 | `shift+tab` | Switch focus backwards |
 | `up` / `down`, `k` / `j` | Move within the focused pane |
-| `1` | Jump selection to `[1] MAIN` |
-| `2` | Jump selection to `[2] B-TREES` |
-| `3` | Jump selection to `[3] PAGES` |
+| `1` | Jump selection to `[1] B-TREES` |
+| `2` | Jump selection to `[2] PAGES` |
 | `enter` | Open the selected navigation item or page |
 | `f` | Filter pages to the selected table or index b-tree |
 | `F` | Clear the active filter |
-| `esc` | Clear the active filter; when unfiltered, return to the page summary or overview |
+| `esc` | Clear the active filter; when unfiltered, reset page sub-selection/loading state |
 | `q` | Quit |
 
-The `1`, `2`, and `3` jumps move the navigation cursor only; press `enter` to open the selected row. Navigation arrows are confined to the current section, so use the numbered jumps to move between `MAIN`, `B-TREES`, and `PAGES`.
+The `1` and `2` jumps move the navigation cursor only; press `enter` to open the selected row. Navigation arrows are confined to the current section, so use the numbered jumps to move between `B-TREES` and `PAGES`.
 
 ## What You Can Explore Today
 
-- Database header values, including page size, encoding, schema format, and SQLite version.
+- Database header values on page 1, including page size, encoding, schema format, and SQLite version.
 - Schema objects from `sqlite_schema`, including table and index names, SQL, owning table, and root page.
 - Database pages by page number, either across the whole file or filtered to one table/index b-tree.
 - B-tree page membership for a table or index, derived by walking interior child pointers from its root page.
