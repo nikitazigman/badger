@@ -60,6 +60,38 @@ func TestApplyFilterIndexed(t *testing.T) {
 	}
 }
 
+func TestApplyFilterSQLiteSchema(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	catalog := objectByName(t, m.db, "sqlite_schema")
+
+	if !catalog.IsSystem {
+		t.Fatal("sqlite_schema row is not marked as a system catalog")
+	}
+	if catalog.RootPage != 1 {
+		t.Fatalf("sqlite_schema root page = %d, want 1", catalog.RootPage)
+	}
+
+	m.applyFilter(catalog)
+
+	if !m.isFiltered() {
+		t.Fatal("applyFilter on sqlite_schema did not set a filter")
+	}
+	pages, ok := m.filteredPages()
+	if !ok {
+		t.Fatal("filteredPages returned ok=false after applying sqlite_schema filter")
+	}
+	walk, err := inspector.PagesForRoot(1)
+	if err != nil {
+		t.Fatalf("PagesForRoot(1) returned error: %v", err)
+	}
+	if !equalRoots(pages, walk.Pages) {
+		t.Fatalf("filteredPages = %v, want sqlite_schema walk pages %v", pages, walk.Pages)
+	}
+}
+
 func TestApplyFilterVirtualTable(t *testing.T) {
 	t.Parallel()
 
@@ -235,11 +267,11 @@ func TestFilterKeyNoOpOnNonBTreeRow(t *testing.T) {
 
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
-	m.selectFirstKind(navOverview) // a MAIN row, not a B-TREES object
+	m.selectFirstKind(navPage) // not a B-TREES object
 
 	next, _ := m.Update(keyMsg("f"))
 	if next.(model).isFiltered() {
-		t.Fatal("f on a MAIN row must be a no-op")
+		t.Fatal("f on a page row must be a no-op")
 	}
 }
 
