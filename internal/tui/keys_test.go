@@ -47,10 +47,14 @@ func TestSectionJumpsAutoActivate(t *testing.T) {
 	// Start from an arbitrary selection outside B-TREES.
 	m.selectFirstKind(navPage)
 	m.active = contentTarget{kind: navPage}
+	m.focusedPane = inspectorPane
 
 	// 1 → first B-TREES row.
 	next, _ := m.Update(keyMsg("1"))
 	got := next.(model)
+	if got.focusedPane != navPane {
+		t.Fatalf("1 focused pane = %v, want navPane", got.focusedPane)
+	}
 	if want := got.indexOfFirstBTree(); got.selectedIndex != want {
 		t.Fatalf("1 selected index %d, want first B-TREES row %d", got.selectedIndex, want)
 	}
@@ -59,8 +63,12 @@ func TestSectionJumpsAutoActivate(t *testing.T) {
 	}
 
 	// 2 → first PAGES row.
+	got.focusedPane = explorerPane
 	next, cmd := got.Update(keyMsg("2"))
 	got = next.(model)
+	if got.focusedPane != navPane {
+		t.Fatalf("2 focused pane = %v, want navPane", got.focusedPane)
+	}
 	if want := firstIndexOfKind(got.navItems, navPage); got.selectedIndex != want {
 		t.Fatalf("2 selected index %d, want first navPage row %d", got.selectedIndex, want)
 	}
@@ -125,6 +133,46 @@ func TestJumpBTreesFallsBackToIndex(t *testing.T) {
 	}
 }
 
+func TestSectionJumpsActivateWhenSelectionAlreadyOnTarget(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	m.selectedIndex = m.indexOfFirstBTree()
+	m.active = contentTarget{kind: navPage, pageNumber: 1}
+	m.focusedPane = inspectorPane
+	next, cmd := m.Update(keyMsg("1"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("1 returned cmd %v, want nil for b-tree activation", cmd)
+	}
+	if got.focusedPane != navPane {
+		t.Fatalf("1 focused pane = %v, want navPane", got.focusedPane)
+	}
+	if got.active.kind != got.selectedItem().kind || got.active.schemaName != got.selectedItem().schema.Name {
+		t.Fatalf("1 did not activate already-selected b-tree; active=%+v selected=%+v", got.active, got.selectedItem())
+	}
+
+	m = got
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	m.active = contentTarget{kind: navTable, schemaName: "sqlite_schema"}
+	m.focusedPane = explorerPane
+	next, cmd = m.Update(keyMsg("2"))
+	got = next.(model)
+	if cmd == nil {
+		t.Fatal("2 did not return page load command for already-selected page")
+	}
+	if got.focusedPane != navPane {
+		t.Fatalf("2 focused pane = %v, want navPane", got.focusedPane)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("2 did not activate already-selected page; active=%+v selected=%+v", got.active, got.selectedItem())
+	}
+}
+
 func TestRemovedLetterKeysAreNoOps(t *testing.T) {
 	t.Parallel()
 
@@ -146,24 +194,193 @@ func TestRemovedLetterKeysAreNoOps(t *testing.T) {
 	}
 }
 
-func TestReservedNumberKeysAreNoOps(t *testing.T) {
+func TestTabKeysAreNoOps(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
-	m.selectFirstKind(navPage)
+	m.focusedPane = explorerPane
 	idx := m.selectedIndex
 	active := m.active
 
-	for _, key := range []string{"3", "4"} {
-		next, _ := m.Update(keyMsg(key))
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyTab},
+		{Type: tea.KeyShiftTab},
+	} {
+		next, cmd := m.Update(key)
 		got := next.(model)
+		if cmd != nil {
+			t.Fatalf("%q returned cmd %v, want nil", key, cmd)
+		}
+		if got.focusedPane != explorerPane {
+			t.Fatalf("%q changed focusedPane from explorerPane to %v", key, got.focusedPane)
+		}
 		if got.selectedIndex != idx {
-			t.Fatalf("%q moved selectedIndex from %d to %d; should be reserved", key, idx, got.selectedIndex)
+			t.Fatalf("%q moved selectedIndex from %d to %d", key, idx, got.selectedIndex)
 		}
 		if got.active != active {
-			t.Fatalf("%q changed m.active; should be reserved", key)
+			t.Fatalf("%q changed active from %+v to %+v", key, active, got.active)
 		}
+	}
+}
+
+func TestNumberedContentPaneJumpsPreserveNavigationState(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+	if m.activeFilter == nil {
+		t.Fatal("setup: filter not active")
+	}
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows after applying filter")
+	}
+
+	idx := m.selectedIndex
+	active := m.active
+	filterSource := m.activeFilter.object
+
+	for _, tc := range []struct {
+		key  string
+		pane pane
+	}{
+		{key: "3", pane: explorerPane},
+		{key: "4", pane: inspectorPane},
+	} {
+		m.focusedPane = navPane
+		next, cmd := m.Update(keyMsg(tc.key))
+		got := next.(model)
+		if cmd != nil {
+			t.Fatalf("%q returned cmd %v, want nil", tc.key, cmd)
+		}
+		if got.focusedPane != tc.pane {
+			t.Fatalf("%q focused pane = %v, want %v", tc.key, got.focusedPane, tc.pane)
+		}
+		if got.selectedIndex != idx {
+			t.Fatalf("%q moved selectedIndex from %d to %d", tc.key, idx, got.selectedIndex)
+		}
+		if got.active != active {
+			t.Fatalf("%q changed m.active from %+v to %+v", tc.key, active, got.active)
+		}
+		if got.activeFilter == nil || got.activeFilter.object != filterSource {
+			t.Fatalf("%q changed active filter from %+v to %+v", tc.key, filterSource, got.activeFilter)
+		}
+	}
+}
+
+func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	if len(loaded.pageRows) < 2 {
+		t.Fatalf("setup: loaded %d page rows, want at least 2", len(loaded.pageRows))
+	}
+
+	next, cmd = loaded.Update(keyMsg("3"))
+	detail := next.(model)
+	if cmd != nil {
+		t.Fatal("3 returned a command")
+	}
+	selectedIndex := detail.selectedIndex
+	next, cmd = detail.Update(tea.KeyMsg{Type: tea.KeyDown})
+	detailMoved := next.(model)
+	if cmd != nil {
+		t.Fatal("detail down returned a command")
+	}
+	if detailMoved.focusedPane != explorerPane {
+		t.Fatalf("detail focus = %v, want explorerPane", detailMoved.focusedPane)
+	}
+	if detailMoved.explorerIndex != 1 {
+		t.Fatalf("detail down set explorerIndex = %d, want 1", detailMoved.explorerIndex)
+	}
+	if detailMoved.selectedIndex != selectedIndex {
+		t.Fatalf("detail down moved nav selection from %d to %d", selectedIndex, detailMoved.selectedIndex)
+	}
+
+	next, cmd = detailMoved.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	next, cmd = meta.Update(tea.KeyMsg{Type: tea.KeyDown})
+	metaScrolled := next.(model)
+	if cmd != nil {
+		t.Fatal("meta down returned a command")
+	}
+	if metaScrolled.focusedPane != inspectorPane {
+		t.Fatalf("meta focus = %v, want inspectorPane", metaScrolled.focusedPane)
+	}
+	if metaScrolled.inspectorScroll != 1 {
+		t.Fatalf("meta down set inspectorScroll = %d, want 1", metaScrolled.inspectorScroll)
+	}
+	if metaScrolled.explorerIndex != detailMoved.explorerIndex {
+		t.Fatalf("meta down changed explorerIndex from %d to %d", detailMoved.explorerIndex, metaScrolled.explorerIndex)
+	}
+	if metaScrolled.selectedIndex != selectedIndex {
+		t.Fatalf("meta down moved nav selection from %d to %d", selectedIndex, metaScrolled.selectedIndex)
+	}
+}
+
+func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	if len(loaded.pageRows) < 3 {
+		t.Fatalf("setup: loaded %d page rows, want at least 3", len(loaded.pageRows))
+	}
+
+	loaded.focusedPane = explorerPane
+	loaded.explorerIndex = 2
+	loaded.inspectorScroll = 3
+	active := loaded.active
+	selectedIndex := loaded.selectedIndex
+	next, cmd = loaded.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("enter in detail returned cmd %v, want nil", cmd)
+	}
+	if got.explorerIndex != 2 {
+		t.Fatalf("enter in detail reset explorerIndex to %d, want 2", got.explorerIndex)
+	}
+	if got.inspectorScroll != 3 {
+		t.Fatalf("enter in detail changed inspectorScroll to %d, want 3", got.inspectorScroll)
+	}
+	if got.active != active || got.selectedIndex != selectedIndex {
+		t.Fatalf("enter in detail changed active/selection: active=%+v selected=%d", got.active, got.selectedIndex)
+	}
+
+	got.focusedPane = inspectorPane
+	next, cmd = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = next.(model)
+	if cmd != nil {
+		t.Fatalf("enter in meta returned cmd %v, want nil", cmd)
+	}
+	if got.explorerIndex != 2 {
+		t.Fatalf("enter in meta reset explorerIndex to %d, want 2", got.explorerIndex)
+	}
+
+	got.focusedPane = navPane
+	next, cmd = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = next.(model)
+	if cmd == nil {
+		t.Fatal("enter in navigation did not activate selected page")
+	}
+	if got.explorerIndex != 0 {
+		t.Fatalf("enter in navigation left explorerIndex = %d, want reset to 0", got.explorerIndex)
 	}
 }
 
@@ -305,7 +522,7 @@ func TestLoadingIndicatorAppearsAfterDelayOnly(t *testing.T) {
 	if !strings.Contains(delayed.View(), "Loading page") {
 		t.Fatal("view does not show loading copy after the delay elapses")
 	}
-	if strings.Contains(delayed.viewNavigation(24, 20), "Loading page") {
+	if strings.Contains(delayed.viewNavigationColumn(24, 20), "Loading page") {
 		t.Fatal("navigation pane shows loading copy")
 	}
 
@@ -382,16 +599,16 @@ func TestStalePageLoadedMessageIgnored(t *testing.T) {
 	}
 }
 
-func TestSectionHeadersShowJumpNumbers(t *testing.T) {
+func TestVisibleJumpLabels(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
 	view := m.View()
-	for _, label := range []string{"[1] B-TREES", "[2] PAGES"} {
+	for _, label := range []string{"[1] B-TREES", "[2] PAGES", "[3] DETAIL", "[4] META"} {
 		if !strings.Contains(view, label) {
-			t.Fatalf("navigation pane missing section header %q", label)
+			t.Fatalf("view missing jump label %q", label)
 		}
 	}
 	for _, removed := range []string{"[1] MAIN", "Overview", "DB Header"} {
@@ -404,6 +621,62 @@ func TestSectionHeadersShowJumpNumbers(t *testing.T) {
 	for _, dropped := range []string{"1 main · 2 b-trees", "g overview", "h header"} {
 		if strings.Contains(view, dropped) {
 			t.Fatalf("footer still advertises removed hint %q", dropped)
+		}
+	}
+	for _, label := range []string{"[1] b-trees", "[2] pages", "[3] detail", "[4] meta"} {
+		if strings.Contains(m.footerLine(), label) {
+			t.Fatalf("footer still explains obvious jump hint %q: %q", label, m.footerLine())
+		}
+	}
+}
+
+func TestNavigationSectionsRenderAsSeparateFrames(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	nav := m.viewNavigationColumn(28, 22)
+	if strings.Contains(nav, "Navigation") {
+		t.Fatalf("navigation column still renders generic title:\n%s", nav)
+	}
+	if strings.Count(nav, "┌") != 2 {
+		t.Fatalf("navigation column should render two framed sections:\n%s", nav)
+	}
+	for _, label := range []string{"[1] B-TREES", "[2] PAGES"} {
+		if !strings.Contains(nav, label) {
+			t.Fatalf("navigation column missing section frame title %q:\n%s", label, nav)
+		}
+	}
+}
+
+func TestContentPaneTitlesShowJumpNumbers(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	m.width = 80
+	m.height = 24
+	fullView := m.View()
+	fullViewLines := strings.Split(fullView, "\n")
+	if got := len(fullViewLines); got != m.height {
+		t.Fatalf("80x24 view has %d rows, want %d:\n%s", got, m.height, fullView)
+	}
+	if strings.TrimSpace(fullViewLines[0]) != "" {
+		t.Fatalf("80x24 view first row = %q, want top inset", fullViewLines[0])
+	}
+	if !strings.Contains(fullViewLines[1], "┌") {
+		t.Fatalf("80x24 view second row = %q, want top border", fullViewLines[1])
+	}
+	for idx, line := range fullViewLines {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("80x24 view row %d width = %d, want <= %d: %q", idx, got, m.width, line)
+		}
+	}
+	for _, label := range []string{"[3] DETAIL", "[4] META", "sqlite_schema"} {
+		if !strings.Contains(fullView, label) {
+			t.Fatalf("80x24 view missing %q:\n%s", label, fullView)
 		}
 	}
 }

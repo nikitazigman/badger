@@ -78,12 +78,12 @@ Badger opens directly into an interactive TUI.
 The interface has three panes:
 
 - Navigation: `[1] B-TREES` and `[2] PAGES`.
-- Explorer: the currently selected view, such as schema object details or page structures.
-- Inspector: contextual details for the selected item, including byte ranges, raw bytes, byte maps, decoded fields, and actions.
+- Detail: `[3]`, the currently selected view, such as schema object details or page structures.
+- Meta: `[4]`, contextual details for the selected item, including byte ranges, raw bytes, byte maps, decoded fields, and actions.
 
 The `B-TREES` section merges tables and indexes into one list. It starts with the SQLite-created `sqlite_schema` system catalog at root page 1. Tables use `▦`, indexes use `◈`, and root-page-zero objects use `⊞` because they do not have their own b-tree. The `PAGES` section shows every database page by default.
 
-In the page view, the Explorer pane lists page structures such as the page header, pointer array, free space, and cells. Selecting a row shows the related raw bytes and parsed byte map in the Inspector pane.
+In the page view, the Detail pane lists page structures such as the page header, pointer array, free space, and cells. Selecting a row shows the related raw bytes and parsed byte map in the Meta pane.
 
 ## Filtering Pages by B-Tree
 
@@ -104,17 +104,17 @@ Keybindings:
 
 | Key | Action |
 | --- | --- |
-| `tab` | Switch focus between panes |
-| `shift+tab` | Switch focus backwards |
 | `up` / `down`, `k` / `j` | Move within the focused pane |
-| `1` | Jump selection to `[1] B-TREES` |
-| `2` | Jump selection to `[2] PAGES` |
-| `enter` | Open the selected navigation item or page |
+| `1` | Focus `[1] B-TREES`, jump to the first b-tree row, and open it |
+| `2` | Focus `[2] PAGES`, jump to the first page row, and load it |
+| `3` | Focus `[3] Detail` |
+| `4` | Focus `[4] Meta` |
+| `enter` | Open the selected row when `[1] B-TREES` or `[2] PAGES` is focused |
 | `f` | Filter pages to the selected table/index b-tree; clear it on the active source row |
 | `esc` | Clear the active filter; when unfiltered, reset page sub-selection/loading state |
 | `q` | Quit |
 
-The `1` and `2` jumps move the navigation cursor only; press `enter` to open the selected row. Navigation arrows are confined to the current section, so use the numbered jumps to move between `B-TREES` and `PAGES`.
+Use `1` through `4` to choose the active view. The `1` and `2` jumps move the navigation cursor between sections and open the selected row. The `3` and `4` jumps only change pane focus; they do not change the selected navigation row or active filter. Navigation arrows are confined to the current section, so use the numbered jumps to move between `B-TREES` and `PAGES`.
 
 ## What You Can Explore Today
 
