@@ -280,16 +280,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		item := m.selectedItem()
 		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
+			if m.objectIsFilterSource(*item.schema) {
+				m.clearFilter()
+				next, cmd := m.activateSelected()
+				activated := next.(model)
+				activated.status = "filter cleared"
+				return activated, cmd
+			}
 			m.applyFilter(*item.schema)
-			return m.activateSelected()
+			if m.objectIsFilterSource(*item.schema) {
+				return m.activateSelected()
+			}
 		}
 		return m, nil
-	case "F":
-		if !m.isFiltered() {
-			return m, nil
-		}
-		m.clearFilter()
-		return m.activateSelected()
 	case "enter":
 		return m.activateSelected()
 	case "up", "k":
@@ -494,7 +497,7 @@ func (m model) View() string {
 // segment (a transient status, or the filter token while filtered) is prepended to them.
 const (
 	navKeys    = "tab focus · ↑↓ inspect · f filter · q quit"
-	filterKeys = "F clear · tab focus · ↑↓ inspect · q quit"
+	filterKeys = "f clear/switch · tab focus · ↑↓ inspect · q quit"
 )
 
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
@@ -890,7 +893,7 @@ func (m model) viewInspector(width int, height int) string {
 			}
 			lines = append(lines, "", sectionStyle.Render("ACTIONS"))
 			if m.objectIsFilterSource(obj) {
-				lines = append(lines, "- F        clear filter")
+				lines = append(lines, "- f        clear filter")
 			} else {
 				lines = append(lines, "- f        filter pages to this b-tree")
 			}

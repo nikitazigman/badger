@@ -89,7 +89,7 @@ In the page view, the Explorer pane lists page structures such as the page heade
 
 Badger can scope the `PAGES` list to a single table or index b-tree.
 
-Move to a table or index in `[1] B-TREES` and press `f`. Badger filters `[2] PAGES` to the pages reachable from that object's root page, including interior and leaf b-tree pages. The active filter stays on until you clear it with `F` or `esc`, and the source row is marked with `▶`.
+Move to a table or index in `[1] B-TREES` and press `f`. Badger filters `[2] PAGES` to the pages reachable from that object's root page, including interior and leaf b-tree pages. Press `f` again on the active source row to clear the filter, or press `f` on another table/index row to switch it. `esc` also clears the active filter first, and the source row is marked with `▶`.
 
 Filtering is read-only and backed by a b-tree page index built in the background when Badger starts. If indexing has not finished for the selected object, Badger asks you to retry in a moment. If some child pages cannot be parsed, Badger still applies the filter to the pages it could read and reports the skipped pages in the footer.
 
@@ -110,8 +110,7 @@ Keybindings:
 | `1` | Jump selection to `[1] B-TREES` |
 | `2` | Jump selection to `[2] PAGES` |
 | `enter` | Open the selected navigation item or page |
-| `f` | Filter pages to the selected table or index b-tree |
-| `F` | Clear the active filter |
+| `f` | Filter pages to the selected table/index b-tree; clear it on the active source row |
 | `esc` | Clear the active filter; when unfiltered, reset page sub-selection/loading state |
 | `q` | Quit |
 

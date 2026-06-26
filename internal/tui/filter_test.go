@@ -247,6 +247,7 @@ func TestFilterKeysViaUpdate(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 	companies := objectByName(t, m.db, "companies")
+	index := objectByName(t, m.db, "idx_companies_country")
 	m.selectedIndex = indexOfBTreeRow(m.navItems, companies)
 
 	next, _ := m.Update(keyMsg("f"))
@@ -254,11 +255,31 @@ func TestFilterKeysViaUpdate(t *testing.T) {
 	if !filtered.isFiltered() {
 		t.Fatal("KeyMsg{f} on a B-TREES row did not apply a filter")
 	}
+	if !filtered.objectIsFilterSource(companies) {
+		t.Fatalf("active filter source = %+v, want companies", filtered.activeFilter)
+	}
 
-	next, _ = filtered.Update(keyMsg("F"))
+	next, _ = filtered.Update(keyMsg("f"))
 	cleared := next.(model)
 	if cleared.isFiltered() {
-		t.Fatal("KeyMsg{F} did not clear the filter")
+		t.Fatal("KeyMsg{f} on the active source row did not clear the filter")
+	}
+	if cleared.selectedIndex != indexOfBTreeRow(cleared.navItems, companies) {
+		t.Fatalf("clearing with f moved selectedIndex to %d, want companies row", cleared.selectedIndex)
+	}
+
+	m.selectedIndex = indexOfBTreeRow(m.navItems, companies)
+	next, _ = m.Update(keyMsg("f"))
+	filtered = next.(model)
+	filtered.selectedIndex = indexOfBTreeRow(filtered.navItems, index)
+
+	next, _ = filtered.Update(keyMsg("f"))
+	switched := next.(model)
+	if !switched.isFiltered() {
+		t.Fatal("KeyMsg{f} on another B-TREES row cleared the filter; want switch")
+	}
+	if !switched.objectIsFilterSource(index) {
+		t.Fatalf("active filter source = %+v, want idx_companies_country", switched.activeFilter)
 	}
 }
 
@@ -270,8 +291,19 @@ func TestFilterKeyNoOpOnNonBTreeRow(t *testing.T) {
 	m.selectFirstKind(navPage) // not a B-TREES object
 
 	next, _ := m.Update(keyMsg("f"))
-	if next.(model).isFiltered() {
+	got := next.(model)
+	if got.isFiltered() {
 		t.Fatal("f on a page row must be a no-op")
+	}
+
+	companies := objectByName(t, got.db, "companies")
+	got.applyFilter(companies)
+	got.selectFirstKind(navPage) // not a B-TREES object
+
+	next, _ = got.Update(keyMsg("f"))
+	stillFiltered := next.(model)
+	if !stillFiltered.objectIsFilterSource(companies) {
+		t.Fatal("f on a page row changed the active filter")
 	}
 }
 
@@ -287,8 +319,8 @@ func TestFilterRenderFooterAndMarkers(t *testing.T) {
 	if !strings.Contains(view, "⦿ filtered: ▦ companies") {
 		t.Fatalf("View missing filter footer token; got footer build %q", m.filterToken())
 	}
-	if !strings.Contains(view, "F clear") {
-		t.Fatal("View missing 'F clear' in the filter footer")
+	if !strings.Contains(view, "f clear/switch") {
+		t.Fatal("View missing 'f clear/switch' in the filter footer")
 	}
 	// The cursor is on the source row → a single ▶ marker, never '> ▶'.
 	if strings.Contains(view, "> ▶") || strings.Contains(view, "▶ >") {
