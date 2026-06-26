@@ -3,11 +3,14 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nikitazigman/badger/internal/sqlite"
 )
+
+const loadingIndicatorDelay = 500 * time.Millisecond
 
 type pane int
 
@@ -33,6 +36,16 @@ type navItem struct {
 	subtitle   string
 	pageNumber uint32
 	schema     *schemaObjectViewModel
+}
+
+type loadingDelayElapsedMsg struct {
+	pageNumber uint32
+}
+
+func showLoadingAfterDelayCmd(pageNumber uint32) tea.Cmd {
+	return tea.Tick(loadingIndicatorDelay, func(time.Time) tea.Msg {
+		return loadingDelayElapsedMsg{pageNumber: pageNumber}
+	})
 }
 
 type contentTarget struct {
@@ -63,6 +76,7 @@ type model struct {
 	height          int
 	status          string
 	loading         bool
+	loadingVisible  bool
 	err             error
 	pageIndex       sqlite.PageIndex  // root → PageWalk (ready entries only)
 	indexRoots      []uint32          // unique, non-zero roots dispatched at launch
@@ -79,12 +93,13 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 	}
 
 	indexRoots := collectBTreeRoots(db)
+	navItems := buildNavItems(db, nil, nil)
 
 	return model{
 		inspector:     inspector,
 		db:            db,
-		navItems:      buildNavItems(db, nil, nil),
-		active:        contentTarget{kind: navOverview},
+		navItems:      navItems,
+		active:        initialContentTarget(navItems),
 		focusedPane:   navPane,
 		width:         120,
 		height:        34,
@@ -201,12 +216,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case pageLoadedMsg:
+		if msg.page == nil || m.active.kind != navPage || msg.page.PageNumber != m.active.pageNumber {
+			return m, nil
+		}
 		m.currentPage = msg.page
 		m.pageRows = buildPageRows(msg.page)
 		m.explorerIndex = 0
 		m.inspectorScroll = 0
 		m.loading = false
-		m.status = fmt.Sprintf("opened page %d", msg.page.PageNumber)
+		m.loadingVisible = false
+		return m, nil
+	case loadingDelayElapsedMsg:
+		if !m.loading || m.active.kind != navPage || msg.pageNumber != m.active.pageNumber {
+			return m, nil
+		}
+		m.loadingVisible = true
 		return m, nil
 	case btreeIndexedMsg:
 		if m.indexPending > 0 {
@@ -224,6 +248,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case errMsg:
 		m.loading = false
+		m.loadingVisible = false
 		m.err = msg.err
 		m.status = msg.err.Error()
 		return m, nil
@@ -236,35 +261,52 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
-	case "tab":
-		m.focusedPane = (m.focusedPane + 1) % 3
-		return m, nil
-	case "shift+tab":
-		m.focusedPane = (m.focusedPane + 2) % 3
-		return m, nil
 	case "1":
-		m.selectFirstKind(navOverview) // first MAIN row; select-only
+		m.focusedPane = navPane
+		m.selectFirstBTreeRow() // first navTable, else first navIndex
+		if item := m.selectedItem(); item.kind == navTable || item.kind == navIndex {
+			return m.activateSelected()
+		}
 		return m, nil
 	case "2":
-		m.selectFirstBTreeRow() // first navTable, else first navIndex
+		m.focusedPane = navPane
+		m.selectFirstKind(navPage) // first PAGES row (was `p`)
+		if m.selectedItem().kind == navPage {
+			return m.activateSelected()
+		}
 		return m, nil
 	case "3":
-		m.selectFirstKind(navPage) // first PAGES row; select-only (was `p`)
+		m.focusedPane = explorerPane
+		return m, nil
+	case "4":
+		m.focusedPane = inspectorPane
 		return m, nil
 	case "f":
 		item := m.selectedItem()
 		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
+			if m.objectIsFilterSource(*item.schema) {
+				m.clearFilter()
+				next, cmd := m.activateSelected()
+				activated := next.(model)
+				activated.status = "filter cleared"
+				return activated, cmd
+			}
 			m.applyFilter(*item.schema)
+			if m.objectIsFilterSource(*item.schema) {
+				return m.activateSelected()
+			}
 		}
 		return m, nil
-	case "F":
-		m.clearFilter()
-		return m, nil
 	case "enter":
-		return m.openSelected()
+		if m.focusedPane == navPane {
+			return m.activateSelected()
+		}
+		return m, nil
 	case "up", "k":
 		if m.focusedPane == navPane {
-			m.moveSelection(-1)
+			if m.moveSelection(-1) {
+				return m.activateSelected()
+			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveExplorerSelection(-1)
 		} else if m.focusedPane == inspectorPane {
@@ -273,7 +315,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "down", "j":
 		if m.focusedPane == navPane {
-			m.moveSelection(1)
+			if m.moveSelection(1) {
+				return m.activateSelected()
+			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveExplorerSelection(1)
 		} else if m.focusedPane == inspectorPane {
@@ -306,48 +350,59 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "returned to page summary"
 			return m, nil
 		}
-		m.active = contentTarget{kind: navOverview}
-		m.currentPage = nil
-		m.pageRows = nil
+		m.explorerIndex = 0
+		m.loading = false
+		m.loadingVisible = false
 		m.inspectorScroll = 0
-		m.status = "returned to overview"
+		m.status = "reset page selection"
 		return m, nil
 	}
 
 	return m, nil
 }
 
-func (m *model) moveSelection(delta int) {
+func (m *model) moveSelection(delta int) bool {
 	next := m.selectedIndex + delta
 	if next < 0 || next >= len(m.navItems) {
-		return
+		return false
 	}
-	// Arrows stay within the current section; 1/2/3 cross sections.
+	// Arrows stay within the current section; 1/2 cross sections.
 	if sectionForNavItem(m.navItems[next]) != sectionForNavItem(m.navItems[m.selectedIndex]) {
-		return
+		return false
 	}
 	m.selectedIndex = next
 	m.inspectorScroll = 0
+	return true
 }
 
-func (m *model) selectFirstKind(kind navKind) {
+func (m *model) selectFirstKind(kind navKind) bool {
 	for idx, item := range m.navItems {
 		if item.kind == kind {
+			if m.selectedIndex == idx {
+				return false
+			}
 			m.selectedIndex = idx
-			return
+			m.inspectorScroll = 0
+			return true
 		}
 	}
+	return false
 }
 
 // selectFirstBTreeRow jumps to the first row of the merged B-TREES section: the first
 // table, or the first index when the database has no tables.
-func (m *model) selectFirstBTreeRow() {
+func (m *model) selectFirstBTreeRow() bool {
 	for idx, item := range m.navItems {
 		if item.kind == navTable || item.kind == navIndex {
+			if m.selectedIndex == idx {
+				return false
+			}
 			m.selectedIndex = idx
-			return
+			m.inspectorScroll = 0
+			return true
 		}
 	}
+	return false
 }
 
 func (m *model) moveExplorerSelection(delta int) {
@@ -375,12 +430,14 @@ func (m *model) scrollInspector(direction int, amount int) {
 	}
 }
 
-func (m model) openSelected() (tea.Model, tea.Cmd) {
+func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	item := m.selectedItem()
 	m.active = contentTarget{
 		kind: item.kind,
 	}
 	m.err = nil
+	m.loading = false
+	m.loadingVisible = false
 
 	switch item.kind {
 	case navOverview:
@@ -407,14 +464,21 @@ func (m model) openSelected() (tea.Model, tea.Cmd) {
 	case navPage:
 		m.active.pageNumber = item.pageNumber
 		m.explorerIndex = 0
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		m.loading = true
-		m.status = fmt.Sprintf("loading page %d", item.pageNumber)
-		return m, loadPageCmd(m.inspector, item.pageNumber)
+		m.loadingVisible = false
+		m.status = ""
+		return m, tea.Batch(
+			loadPageCmd(m.inspector, item.pageNumber),
+			showLoadingAfterDelayCmd(item.pageNumber),
+		)
 	default:
 		return m, nil
 	}
+}
+
+func (m model) openSelected() (tea.Model, tea.Cmd) {
+	return m.activateSelected()
 }
 
 func (m model) View() string {
@@ -422,25 +486,53 @@ func (m model) View() string {
 		return "terminal too small for badger"
 	}
 
-	navWidth := clamp(m.width/4, 24, 34)
-	inspectorWidth := clamp(m.width/4, 28, 38)
-	explorerWidth := m.width - navWidth - inspectorWidth - 2
-	bodyHeight := m.height - 1
+	rootMarginX := 1
+	rootMarginTop := 1
+	availableWidth := max(0, m.width-rootMarginX*2)
+	bodyHeight := max(0, m.height-rootMarginTop-1)
 
-	nav := paneStyle(m.focusedPane == navPane, navWidth, bodyHeight).Render(m.viewNavigation(navWidth-2, bodyHeight-2))
-	explorer := paneStyle(m.focusedPane == explorerPane, explorerWidth, bodyHeight).Render(m.viewExplorer(explorerWidth-2, bodyHeight-2))
-	inspector := paneStyle(m.focusedPane == inspectorPane, inspectorWidth, bodyHeight).Render(m.viewInspector(inspectorWidth-2, bodyHeight-2))
+	navWidth := clamp(availableWidth/4, 24, 34)
+	inspectorWidth := clamp(availableWidth/4, 28, 38)
+	explorerWidth := availableWidth - navWidth - inspectorWidth
+	paneContentHeight := max(0, bodyHeight-2)
+
+	nav := m.viewNavigationColumn(navWidth, bodyHeight)
+	explorer := renderTitledFrame(
+		explorerWidth,
+		bodyHeight,
+		detailFrameTitle(m.detailHeaderText()),
+		m.focusedPane == explorerPane,
+		strings.Split(m.viewExplorer(paneInnerWidth(explorerWidth), paneContentHeight), "\n"),
+	)
+	inspector := renderTitledFrame(
+		inspectorWidth,
+		bodyHeight,
+		metaFrameTitle(m.metaHeaderText()),
+		m.focusedPane == inspectorPane,
+		strings.Split(m.viewInspector(paneInnerWidth(inspectorWidth), paneContentHeight), "\n"),
+	)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, nav, explorer, inspector)
-	status := statusStyle.Width(m.width).Render(truncateLine(m.footerLine(), m.width))
-	return lipgloss.JoinVertical(lipgloss.Left, body, status)
+	statusWidth := max(0, availableWidth-2)
+	statusText := lipgloss.PlaceHorizontal(statusWidth, lipgloss.Left, truncateCells(m.footerLine(), statusWidth))
+	status := statusStyle.Render(statusText)
+
+	lines := make([]string, 0, m.height)
+	for idx := 0; idx < rootMarginTop; idx++ {
+		lines = append(lines, strings.Repeat(" ", m.width))
+	}
+	for _, line := range strings.Split(body, "\n") {
+		lines = append(lines, insetLine(line, rootMarginX, availableWidth))
+	}
+	lines = append(lines, insetLine(status, rootMarginX, availableWidth))
+	return strings.Join(lines, "\n")
 }
 
 // Persistent key-hint bars. The hints are always visible in the footer; the contextual
 // segment (a transient status, or the filter token while filtered) is prepended to them.
 const (
-	navKeys    = "tab focus · ↑↓ move · enter open · f filter · q quit"
-	filterKeys = "F clear · tab focus · enter open · q quit"
+	navKeys    = "↑↓ move · f filter · q quit"
+	filterKeys = "f clear/switch · ↑↓ move · q quit"
 )
 
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
@@ -454,6 +546,13 @@ func (m model) footerLine() string {
 		return m.status + "  |  " + navKeys
 	}
 	return navKeys
+}
+
+func insetLine(line string, left int, width int) string {
+	if left <= 0 {
+		return lipgloss.PlaceHorizontal(width, lipgloss.Left, truncateCells(line, width))
+	}
+	return strings.Repeat(" ", left) + lipgloss.PlaceHorizontal(width, lipgloss.Left, truncateCells(line, width))
 }
 
 // filterToken renders the active-filter indicator: the source icon + name, page count, and
@@ -479,7 +578,7 @@ func (m model) filterToken() string {
 
 func (m model) selectedItem() navItem {
 	if len(m.navItems) == 0 {
-		return navItem{kind: navOverview, title: "Overview"}
+		return navItem{kind: navPage, title: "page 1", pageNumber: 1}
 	}
 	if m.selectedIndex < 0 || m.selectedIndex >= len(m.navItems) {
 		return m.navItems[0]
@@ -497,36 +596,129 @@ func (m model) selectedPageRow() *pageRowViewModel {
 	return &m.pageRows[m.explorerIndex]
 }
 
-func (m model) viewNavigation(width int, height int) string {
-	rows := make([]string, 0, len(m.navItems)+8)
-	selected := m.selectedItem()
+func (m model) viewNavigationColumn(width int, height int) string {
+	btreeOuterHeight := clamp(m.navSectionSize("B-Trees")+2, 5, max(5, height/2))
+	pagesOuterHeight := height - btreeOuterHeight
+	if pagesOuterHeight < 4 {
+		pagesOuterHeight = 4
+		btreeOuterHeight = max(4, height-pagesOuterHeight)
+	}
 
-	rows = append(rows, titleStyle.Render("Navigation"))
-	rows = append(rows, "")
+	btrees := m.viewNavigationSection(width, btreeOuterHeight, "B-Trees")
+	pages := m.viewNavigationSection(width, pagesOuterHeight, "Pages")
+	return lipgloss.JoinVertical(lipgloss.Left, btrees, pages)
+}
 
-	visible := m.visibleNavItems(height - 2)
-	lastSection := ""
-	for _, row := range visible {
-		if row.section != "" && row.section != lastSection {
-			if len(rows) > 2 {
-				rows = append(rows, "")
-			}
-			rows = append(rows, sectionStyle.Render(sectionLabel(row.section)))
-			lastSection = row.section
-		}
+func (m model) viewNavigationSection(width int, outerHeight int, section string) string {
+	contentHeight := max(0, outerHeight-2)
+	contentWidth := max(0, width-4)
+	active := m.focusedPane == navPane && sectionForNavItem(m.selectedItem()) == section
 
+	rows := make([]string, 0, contentHeight)
+	for _, row := range m.visibleNavSection(section, contentHeight) {
 		lineStyle := navItemStyle
 		if row.index == m.selectedIndex {
 			lineStyle = selectedNavItemStyle
 		}
-		rows = append(rows, lineStyle.Width(width).Render(m.navMarker(row.index)+row.text))
+		rows = append(rows, renderNavLine(lineStyle, contentWidth, m.navMarker(row.index), row.text))
 	}
 
-	if selected.kind == navPage && m.loading {
-		rows = append(rows, "", mutedStyle.Render("Loading page..."))
+	return renderTitledFrame(width, outerHeight, sectionLabel(section), active, rows)
+}
+
+func (m model) navSectionSize(section string) int {
+	count := 0
+	for _, item := range m.navItems {
+		if sectionForNavItem(item) == section {
+			count++
+		}
+	}
+	return count
+}
+
+func (m model) visibleNavSection(section string, height int) []visibleNavRow {
+	rows := make([]visibleNavRow, 0, len(m.navItems))
+	for idx, item := range m.navItems {
+		if sectionForNavItem(item) != section {
+			continue
+		}
+		text := item.title
+		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
+			text = navSchemaRowText(*item.schema)
+		} else if item.subtitle != "" {
+			text += "  " + mutedInline(item.subtitle)
+		}
+		rows = append(rows, visibleNavRow{index: idx, section: section, text: text})
+	}
+	if height <= 0 || len(rows) <= height {
+		return rows
 	}
 
-	return fitVertical(rows, height)
+	selectedLine := 0
+	for idx, row := range rows {
+		if row.index == m.selectedIndex {
+			selectedLine = idx
+			break
+		}
+	}
+	start := selectedLine - height/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + height
+	if end > len(rows) {
+		end = len(rows)
+		start = max(0, end-height)
+	}
+	return rows[start:end]
+}
+
+func renderTitledFrame(width int, height int, title string, active bool, rows []string) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	if width < 4 || height < 2 {
+		return strings.Repeat(" ", width)
+	}
+
+	color := lipgloss.Color("240")
+	titleStyle := navSectionTitleStyle
+	if active {
+		color = lipgloss.Color("33")
+		titleStyle = activeNavSectionTitleStyle
+	}
+	borderStyle := lipgloss.NewStyle().Foreground(color)
+
+	innerWidth := max(0, width-2)
+	leading := 0
+	if innerWidth > 1 {
+		leading = 1
+	}
+	title = truncateCells(title, max(0, innerWidth-leading))
+	topFill := strings.Repeat("─", max(0, innerWidth-leading-lipgloss.Width(title)))
+	lines := []string{
+		borderStyle.Render("┌"+strings.Repeat("─", leading)) + titleStyle.Render(title) + borderStyle.Render(topFill+"┐"),
+	}
+
+	contentWidth := max(0, width-4)
+	contentHeight := height - 2
+	for idx := 0; idx < contentHeight; idx++ {
+		line := ""
+		if idx < len(rows) {
+			line = truncateCells(rows[idx], contentWidth)
+		}
+		line = lipgloss.PlaceHorizontal(contentWidth, lipgloss.Left, line)
+		lines = append(lines, borderStyle.Render("│")+" "+line+" "+borderStyle.Render("│"))
+	}
+	lines = append(lines, borderStyle.Render("└"+strings.Repeat("─", innerWidth)+"┘"))
+	return strings.Join(lines, "\n")
+}
+
+func renderNavLine(style lipgloss.Style, width int, marker string, text string) string {
+	markerWidth := lipgloss.Width(marker)
+	textWidth := max(0, width-markerWidth)
+	line := marker + truncateCells(text, textWidth)
+	return style.Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, line))
 }
 
 // navMarker returns the two-cell row prefix: ▶ for the active filter source (it wins, so
@@ -568,7 +760,7 @@ func (m model) visibleNavItems(height int) []visibleNavRow {
 		}
 		text := item.title
 		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
-			text = objectIcon(*item.schema) + " " + item.title
+			text = navSchemaRowText(*item.schema)
 		} else if item.subtitle != "" {
 			text += "  " + mutedInline(item.subtitle)
 		}
@@ -621,10 +813,36 @@ func (m model) viewExplorer(width int, height int) string {
 	return fitVertical(lines, height)
 }
 
+func (m model) detailHeaderText() string {
+	switch m.active.kind {
+	case navOverview:
+		return "Overview"
+	case navDBHeader:
+		return "Database Header"
+	case navTable, navIndex:
+		if item := m.selectedItem(); item.schema != nil {
+			return item.schema.Name
+		}
+		return "Schema Object"
+	case navPage:
+		if m.isFiltered() {
+			return objectIcon(m.activeFilter.object) + " Page"
+		}
+		return "Page"
+	default:
+		return "No content"
+	}
+}
+
+func (m model) metaHeaderText() string {
+	if m.active.kind == navPage {
+		return fmt.Sprintf("page %d", m.inspectorPageNumber())
+	}
+	return m.selectedItem().title
+}
+
 func (m model) viewOverview(width int) []string {
 	lines := []string{
-		titleStyle.Render("Overview"),
-		"",
 		fmt.Sprintf("File: %s", m.db.Path),
 		fmt.Sprintf("Page size: %s", formatBytes(uint64(m.db.PageSize))),
 		fmt.Sprintf("Page count: %d", m.db.PageCount),
@@ -652,16 +870,13 @@ func (m model) viewOverview(width int) []string {
 		lines = append(lines, mutedStyle.Render("No indexes"))
 	}
 
-	lines = append(lines, "", mutedStyle.Render("Press enter to open the selected item from navigation."))
+	lines = append(lines, "", mutedStyle.Render("Move through navigation to inspect items."))
 	return wrapLines(lines, width)
 }
 
 func (m model) viewDBHeader(width int) []string {
 	header := m.db.HeaderRows
-	lines := []string{
-		titleStyle.Render("Database Header"),
-		"",
-	}
+	lines := []string{}
 	for _, row := range header {
 		lines = append(lines, fmt.Sprintf("%-24s %s", row.Label+":", row.Value))
 	}
@@ -672,7 +887,7 @@ func (m model) viewSchemaObject(width int) []string {
 	item := m.selectedItem()
 	obj := item.schema
 	if obj == nil {
-		return []string{titleStyle.Render("Schema Object"), "", "No schema object selected."}
+		return []string{"No schema object selected."}
 	}
 
 	rootLine := fmt.Sprintf("Root page: %d", obj.RootPage)
@@ -681,38 +896,53 @@ func (m model) viewSchemaObject(width int) []string {
 	}
 
 	lines := []string{
-		titleStyle.Render(objectIcon(*obj) + "  " + strings.ToUpper(obj.Type) + "  " + obj.Name),
-		"",
 		fmt.Sprintf("Type: %s", obj.Type),
 		fmt.Sprintf("Name: %s", obj.Name),
 		fmt.Sprintf("Table: %s", obj.TableName),
 		rootLine,
-		"",
-		sectionStyle.Render("SQL"),
-		obj.SQL,
 	}
+	if obj.IsSystem {
+		lines = append(lines,
+			"System catalog",
+			"SQLite-created",
+			"Filtering shows all reachable catalog b-tree pages.",
+			"Page 1 stores the 100-byte database header before the b-tree payload.",
+			"",
+			sectionStyle.Render("SQL"),
+			"No stored SQL row for sqlite_schema itself.",
+		)
+		return wrapLines(lines, width)
+	}
+	lines = append(lines, "", sectionStyle.Render("SQL"), obj.SQL)
 	return wrapLines(lines, width)
 }
 
 func (m model) viewPage(width int) []string {
 	item := m.selectedItem()
-	pageTitle := "Page"
-	if m.isFiltered() {
-		pageTitle = objectIcon(m.activeFilter.object) + " Page"
+	pageNumber := item.pageNumber
+	preservingLoadedPage := m.loading && !m.loadingVisible && m.currentPage != nil
+	if preservingLoadedPage {
+		pageNumber = m.currentPage.PageNumber
 	}
 	lines := []string{
-		titleStyle.Render(pageTitle),
-		"",
-		fmt.Sprintf("Page number: %d", item.pageNumber),
+		fmt.Sprintf("Page number: %d", pageNumber),
+	}
+	if pageNumber == 1 {
+		lines = append(lines, "Bytes 0-99 are the database header before the b-tree page content.")
 	}
 
 	if m.loading {
-		lines = append(lines, "", "Loading page details...")
-		return wrapLines(lines, width)
+		if !m.loadingVisible && !preservingLoadedPage {
+			return wrapLines(lines, width)
+		}
+		if m.loadingVisible {
+			lines = append(lines, "", "Loading page details...")
+			return wrapLines(lines, width)
+		}
 	}
 
-	if m.currentPage == nil || m.currentPage.PageNumber != item.pageNumber {
-		lines = append(lines, "", "Press enter to load this page.")
+	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+		lines = append(lines, "", "Waiting for page details...")
 		return wrapLines(lines, width)
 	}
 
@@ -756,11 +986,7 @@ func (m model) viewInspector(width int, height int) string {
 		}
 	}
 
-	lines := []string{
-		titleStyle.Render("Inspector"),
-		"",
-		fmt.Sprintf("Selected: %s", item.title),
-	}
+	lines := []string{}
 
 	switch item.kind {
 	case navOverview:
@@ -801,13 +1027,19 @@ func (m model) viewInspector(width int, height int) string {
 				rootLine,
 				m.pagesSummaryLine(obj),
 				fmt.Sprintf("Table:     %s", obj.TableName),
-				"",
-				sectionStyle.Render("ACTIONS"),
 			)
+			if obj.IsSystem {
+				lines = append(lines,
+					"Catalog:   System catalog",
+					"Managed:   SQLite-created",
+					"Page 1:    database header, then catalog b-tree payload",
+				)
+			}
+			lines = append(lines, "", sectionStyle.Render("ACTIONS"))
 			if m.objectIsFilterSource(obj) {
-				lines = append(lines, "- F        clear filter", "- enter    open object")
+				lines = append(lines, "- f        clear filter")
 			} else {
-				lines = append(lines, "- f        filter pages to this b-tree", "- enter    open object")
+				lines = append(lines, "- f        filter pages to this b-tree")
 			}
 		}
 	case navPage:
@@ -817,6 +1049,9 @@ func (m model) viewInspector(width int, height int) string {
 			fmt.Sprintf("Page number: %d", item.pageNumber),
 			fmt.Sprintf("File offset: %d", (item.pageNumber-1)*m.db.PageSize),
 		)
+		if item.pageNumber == 1 {
+			lines = append(lines, "Bytes 0-99: SQLite database header before b-tree content")
+		}
 		if m.currentPage != nil && m.currentPage.PageNumber == item.pageNumber {
 			header := m.currentPage.BTreePage.PageHeader
 			lines = append(lines,
@@ -828,7 +1063,7 @@ func (m model) viewInspector(width int, height int) string {
 		lines = append(lines,
 			"",
 			sectionStyle.Render("ACTIONS"),
-			"- enter to load page",
+			"- move in navigation to load pages",
 			"- [ previous page",
 			"- ] next page",
 		)
@@ -842,15 +1077,13 @@ func (m model) viewInspector(width int, height int) string {
 }
 
 func (m model) viewPageInspector(width int) string {
-	item := m.selectedItem()
-	lines := []string{
-		titleStyle.Render("Inspector"),
-		"",
-		fmt.Sprintf("Selected: page %d", item.pageNumber),
-	}
+	pageNumber := m.inspectorPageNumber()
+	lines := []string{}
 
-	if m.currentPage == nil || m.currentPage.PageNumber != item.pageNumber {
-		lines = append(lines, "", "Load the page to inspect its structures.")
+	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+		if m.loadingVisible {
+			lines = append(lines, "", "Page details are loading.")
+		}
 		return strings.Join(lines, "\n")
 	}
 
@@ -861,8 +1094,8 @@ func (m model) viewPageInspector(width int) string {
 	}
 
 	pageSize := m.pageSizeForCurrentPage()
-	fileStart := row.Meta.FileStartOffset(item.pageNumber, pageSize)
-	fileEndExclusive := row.Meta.FileEndOffset(item.pageNumber, pageSize)
+	fileStart := row.Meta.FileStartOffset(pageNumber, pageSize)
+	fileEndExclusive := row.Meta.FileEndOffset(pageNumber, pageSize)
 	fileEnd := fileEndExclusive
 	if row.Meta.Size > 0 {
 		fileEnd = fileEndExclusive - 1
@@ -895,25 +1128,21 @@ func (m model) viewPageInspector(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func paneStyle(focused bool, width int, height int) lipgloss.Style {
-	border := lipgloss.NormalBorder()
-	color := lipgloss.Color("240")
-	if focused {
-		color = lipgloss.Color("33")
+func (m model) inspectorPageNumber() uint32 {
+	item := m.selectedItem()
+	pageNumber := item.pageNumber
+	if m.loading && !m.loadingVisible && m.currentPage != nil {
+		pageNumber = m.currentPage.PageNumber
 	}
-	return lipgloss.NewStyle().
-		Border(border).
-		BorderForeground(color).
-		Padding(0, 1).
-		Width(width).
-		Height(height)
+	return pageNumber
+}
+
+func paneInnerWidth(outerWidth int) int {
+	return max(0, outerWidth-4)
 }
 
 func (m model) renderInspectorViewport(lines []string, width int, height int) string {
-	contentWidth := width - 2
-	if contentWidth < 8 {
-		contentWidth = width
-	}
+	contentWidth := inspectorContentWidth(width)
 
 	wrapped := wrapInspectorLines(lines, contentWidth)
 	maxScroll := max(0, len(wrapped)-height)
@@ -936,6 +1165,14 @@ func (m model) renderInspectorViewport(lines []string, width int, height int) st
 	}
 
 	return renderScrollbar(visible, contentWidth, height, scroll, maxScroll)
+}
+
+func inspectorContentWidth(width int) int {
+	contentWidth := width - 2
+	if contentWidth < 8 {
+		return width
+	}
+	return contentWidth
 }
 
 func renderScrollbar(lines []string, contentWidth int, height int, scroll int, maxScroll int) string {
@@ -1014,16 +1251,25 @@ func (m model) pageSizeForCurrentPage() uint32 {
 	return 1
 }
 
+func detailFrameTitle(title string) string {
+	return "[3] DETAIL  " + title
+}
+
+func metaFrameTitle(title string) string {
+	return "[4] META  " + title
+}
+
 var (
-	titleStyle           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
-	sectionStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	statusStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
-	navItemStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	selectedNavItemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
-	mutedStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errorStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	scrollbarTrackStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	scrollbarThumbStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	sectionStyle               = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
+	navSectionTitleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
+	activeNavSectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
+	statusStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
+	navItemStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	selectedNavItemStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
+	mutedStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	errorStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	scrollbarTrackStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
 
 // buildNavItems builds the flat nav list. Tables and indexes share one B-TREES section.
@@ -1031,10 +1277,7 @@ var (
 // table) and the full 1..PageCount otherwise. The root page is intentionally not shown on
 // B-TREES rows (it lives in the detail / summary panes — design §2).
 func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []uint32) []navItem {
-	items := []navItem{
-		{kind: navOverview, title: "Overview"},
-		{kind: navDBHeader, title: "DB Header"},
-	}
+	items := []navItem{}
 
 	for _, table := range db.Tables {
 		table := table
@@ -1075,9 +1318,27 @@ func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []u
 	return items
 }
 
-// objectIcon maps a schema object to its B-TREES glyph: ◈ index, ⊞ virtual table / view
-// (no b-tree, RootPage == 0), ▦ ordinary table. Echoed in nav rows, detail/page titles,
-// and the footer filter token. Glyphs are placeholders pending terminal testing (design §7).
+func initialContentTarget(items []navItem) contentTarget {
+	if len(items) == 0 {
+		return contentTarget{kind: navPage, pageNumber: 1}
+	}
+	item := items[0]
+	target := contentTarget{kind: item.kind, pageNumber: item.pageNumber}
+	if item.schema != nil {
+		target.schemaName = item.schema.Name
+	}
+	return target
+}
+
+func navSchemaRowText(obj schemaObjectViewModel) string {
+	if obj.IsSystem {
+		return obj.Name
+	}
+	return objectIcon(obj) + " " + obj.Name
+}
+
+// objectIcon maps a schema object to its glyph: ◈ index, ⊞ virtual table / view (no
+// b-tree, RootPage == 0), ▦ ordinary table.
 func objectIcon(obj schemaObjectViewModel) string {
 	switch {
 	case obj.Type == "index":
@@ -1132,10 +1393,10 @@ func indexCompleteStatus(m model) string {
 	return fmt.Sprintf("indexed %d b-trees (%d failed)", indexed, len(m.indexErrors))
 }
 
-// sectionLabel renders a section header with its jump-key number prefix (e.g. "[1] MAIN"),
-// advertising the 1/2/3 section jumps inline. Sections without a jump key render bare.
+// sectionLabel renders a section header with its jump-key number prefix. Sections without
+// a jump key render bare.
 func sectionLabel(section string) string {
-	num := map[string]string{"Main": "1", "B-Trees": "2", "Pages": "3"}[section]
+	num := map[string]string{"B-Trees": "1", "Pages": "2"}[section]
 	if num == "" {
 		return strings.ToUpper(section)
 	}
@@ -1144,8 +1405,6 @@ func sectionLabel(section string) string {
 
 func sectionForNavItem(item navItem) string {
 	switch item.kind {
-	case navOverview, navDBHeader:
-		return "Main"
 	case navTable, navIndex:
 		return "B-Trees"
 	case navPage:
@@ -1169,11 +1428,7 @@ func fitVertical(lines []string, height int) string {
 func wrapLines(lines []string, width int) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
-			continue
-		}
-		out = append(out, lipgloss.NewStyle().Width(width).Render(line))
+		out = appendRenderedLines(out, line, width)
 	}
 	return out
 }
@@ -1181,27 +1436,43 @@ func wrapLines(lines []string, width int) []string {
 func wrapInspectorLines(lines []string, width int) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
-			continue
+		for _, segment := range strings.Split(line, "\n") {
+			out = appendInspectorLine(out, segment, width)
 		}
-		if strings.Contains(line, "\x1b[") {
-			out = append(out, lipgloss.NewStyle().Width(width).Render(line))
-			continue
-		}
-
-		runes := []rune(line)
-		for len(runes) > width && width > 0 {
-			out = append(out, string(runes[:width]))
-			runes = runes[width:]
-		}
-		if len(runes) == 0 {
-			out = append(out, "")
-			continue
-		}
-		out = append(out, string(runes))
 	}
 	return out
+}
+
+func appendRenderedLines(out []string, line string, width int) []string {
+	for _, segment := range strings.Split(line, "\n") {
+		if strings.TrimSpace(segment) == "" {
+			out = append(out, "")
+			continue
+		}
+		rendered := lipgloss.NewStyle().Width(width).Render(segment)
+		out = append(out, strings.Split(rendered, "\n")...)
+	}
+	return out
+}
+
+func appendInspectorLine(out []string, line string, width int) []string {
+	if strings.TrimSpace(line) == "" {
+		return append(out, "")
+	}
+	if strings.Contains(line, "\x1b[") {
+		rendered := lipgloss.NewStyle().Width(width).Render(line)
+		return append(out, strings.Split(rendered, "\n")...)
+	}
+
+	runes := []rune(line)
+	for len(runes) > width && width > 0 {
+		out = append(out, string(runes[:width]))
+		runes = runes[width:]
+	}
+	if len(runes) == 0 {
+		return append(out, "")
+	}
+	return append(out, string(runes))
 }
 
 func mutedInline(text string) string {
@@ -1252,4 +1523,37 @@ func truncateLine(text string, width int) string {
 		return string(runes[:width])
 	}
 	return string(runes[:width-1]) + "…"
+}
+
+func truncateCells(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	if width <= 1 {
+		for _, r := range text {
+			cellWidth := lipgloss.Width(string(r))
+			if cellWidth <= width {
+				return string(r)
+			}
+			return ""
+		}
+		return ""
+	}
+
+	var b strings.Builder
+	used := 0
+	ellipsisWidth := lipgloss.Width("…")
+	for _, r := range text {
+		cellWidth := lipgloss.Width(string(r))
+		if used+cellWidth+ellipsisWidth > width {
+			break
+		}
+		b.WriteRune(r)
+		used += cellWidth
+	}
+	b.WriteString("…")
+	return b.String()
 }
