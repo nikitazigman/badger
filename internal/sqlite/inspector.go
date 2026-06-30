@@ -80,31 +80,43 @@ type MetadataInspection struct {
 }
 
 func (i *Inspector) InspectDatabaseMetadata() (*MetadataInspection, error) {
-	page, err := i.InspectPage(1)
-	if err != nil {
-		return nil, err
-	}
-
 	definition, err := ParseSchemaDefinitionSQL(sqliteSchemaTableSQL)
 	if err != nil {
 		return nil, err
 	}
 
-	if page.BTreePage.PageHeader.PageKind.Value != LeafTableBTreePage {
-		return nil, fmt.Errorf("page 1 is page kind 0x%02x, want leaf table page", page.BTreePage.PageHeader.PageKind.Value)
+	// The sqlite_schema table is rooted at page 1, but when the schema is large
+	// enough page 1 becomes an interior b-tree node and the rows live on the leaf
+	// pages it points to. Walk the whole b-tree from page 1 so we read every
+	// schema row regardless of tree depth, rather than assuming page 1 is a leaf.
+	walk, err := i.PagesForRoot(1)
+	if err != nil {
+		return nil, err
 	}
 
-	schemaRecords := make([]Row, 0, len(page.BTreePage.TableLeafCells))
-	for idx, cell := range page.BTreePage.TableLeafCells {
-		if cell.ParsedPayload == nil {
-			return nil, fmt.Errorf("sqlite_schema cell %d on page 1 payload is missing", idx)
+	schemaRecords := make([]Row, 0, len(walk.Pages))
+	for _, pageNumber := range walk.Pages {
+		page, err := i.InspectPage(pageNumber)
+		if err != nil {
+			return nil, err
 		}
 
-		record, err := ParseRecord(cell.ParsedPayload, definition)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite_schema cell %d on page 1: %w", idx, err)
+		// Only leaf table pages carry rows; interior pages just route to children.
+		if page.BTreePage.PageHeader.PageKind.Value != LeafTableBTreePage {
+			continue
 		}
-		schemaRecords = append(schemaRecords, record)
+
+		for idx, cell := range page.BTreePage.TableLeafCells {
+			if cell.ParsedPayload == nil {
+				return nil, fmt.Errorf("sqlite_schema cell %d on page %d payload is missing", idx, pageNumber)
+			}
+
+			record, err := ParseRecord(cell.ParsedPayload, definition)
+			if err != nil {
+				return nil, fmt.Errorf("sqlite_schema cell %d on page %d: %w", idx, pageNumber, err)
+			}
+			schemaRecords = append(schemaRecords, record)
+		}
 	}
 
 	return &MetadataInspection{
