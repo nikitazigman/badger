@@ -53,6 +53,37 @@ func TestInspectDatabaseMetadataIncludesSchemaRecords(t *testing.T) {
 		assertSchemaRecord(t, metadata.SchemaRecords[1], "table", "sqlite_sequence", "sqlite_sequence")
 		assertSchemaRecord(t, metadata.SchemaRecords[2], "index", "idx_companies_country", "companies")
 	})
+
+	// multipage_schema.db has so many tables that the sqlite_schema b-tree is
+	// deeper than one page: page 1 is an interior node and the schema rows live on
+	// its leaf children. This guards against regressing to the old "page 1 must be
+	// a leaf" assumption.
+	t.Run("multipage_schema_db", func(t *testing.T) {
+		t.Parallel()
+
+		inspector, err := Open(fixturePath("multipage_schema.db"))
+		if err != nil {
+			t.Fatalf("Open returned error: %v", err)
+		}
+		defer inspector.Close()
+
+		page, err := inspector.InspectPage(1)
+		if err != nil {
+			t.Fatalf("InspectPage(1) returned error: %v", err)
+		}
+		if !page.BTreePage.PageHeader.IsInterior() {
+			t.Fatalf("fixture invariant broken: page 1 is not an interior page (kind 0x%02x)", page.BTreePage.PageHeader.PageKind.Value)
+		}
+
+		metadata, err := inspector.InspectDatabaseMetadata()
+		if err != nil {
+			t.Fatalf("InspectDatabaseMetadata returned error: %v", err)
+		}
+
+		if len(metadata.SchemaRecords) != 120 {
+			t.Fatalf("len(SchemaRecords) = %d, want 120", len(metadata.SchemaRecords))
+		}
+	})
 }
 
 func assertSchemaRecord(t *testing.T, got Row, wantType string, wantName string, wantTableName string) {
