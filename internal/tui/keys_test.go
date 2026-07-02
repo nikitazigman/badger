@@ -102,8 +102,8 @@ func TestSectionJumpsAutoActivate(t *testing.T) {
 	if loaded.currentPage == nil || loaded.currentPage.PageNumber != got.active.pageNumber {
 		t.Fatalf("loaded current page = %+v, want page %d", loaded.currentPage, got.active.pageNumber)
 	}
-	if len(loaded.pageRows) == 0 {
-		t.Fatal("loaded page did not build page rows")
+	if len(loaded.currentPage.BTreePage.Raw) == 0 {
+		t.Fatal("loaded page has no raw bytes")
 	}
 
 	next, _ = loaded.Update(loadingDelayElapsedMsg{pageNumber: got.active.pageNumber})
@@ -280,9 +280,6 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	if len(loaded.pageRows) < 2 {
-		t.Fatalf("setup: loaded %d page rows, want at least 2", len(loaded.pageRows))
-	}
 
 	next, cmd = loaded.Update(keyMsg("3"))
 	detail := next.(model)
@@ -298,8 +295,8 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 	if detailMoved.focusedPane != explorerPane {
 		t.Fatalf("detail focus = %v, want explorerPane", detailMoved.focusedPane)
 	}
-	if detailMoved.explorerIndex != 1 {
-		t.Fatalf("detail down set explorerIndex = %d, want 1", detailMoved.explorerIndex)
+	if detailMoved.inspectorScroll != detail.inspectorScroll {
+		t.Fatalf("detail down changed inspectorScroll from %d to %d", detail.inspectorScroll, detailMoved.inspectorScroll)
 	}
 	if detailMoved.selectedIndex != selectedIndex {
 		t.Fatalf("detail down moved nav selection from %d to %d", selectedIndex, detailMoved.selectedIndex)
@@ -321,9 +318,6 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 	if metaScrolled.inspectorScroll != 1 {
 		t.Fatalf("meta down set inspectorScroll = %d, want 1", metaScrolled.inspectorScroll)
 	}
-	if metaScrolled.explorerIndex != detailMoved.explorerIndex {
-		t.Fatalf("meta down changed explorerIndex from %d to %d", detailMoved.explorerIndex, metaScrolled.explorerIndex)
-	}
 	if metaScrolled.selectedIndex != selectedIndex {
 		t.Fatalf("meta down moved nav selection from %d to %d", selectedIndex, metaScrolled.selectedIndex)
 	}
@@ -339,12 +333,8 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	if len(loaded.pageRows) < 3 {
-		t.Fatalf("setup: loaded %d page rows, want at least 3", len(loaded.pageRows))
-	}
 
 	loaded.focusedPane = explorerPane
-	loaded.explorerIndex = 2
 	loaded.inspectorScroll = 3
 	active := loaded.active
 	selectedIndex := loaded.selectedIndex
@@ -352,9 +342,6 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	got := next.(model)
 	if cmd != nil {
 		t.Fatalf("enter in detail returned cmd %v, want nil", cmd)
-	}
-	if got.explorerIndex != 2 {
-		t.Fatalf("enter in detail reset explorerIndex to %d, want 2", got.explorerIndex)
 	}
 	if got.inspectorScroll != 3 {
 		t.Fatalf("enter in detail changed inspectorScroll to %d, want 3", got.inspectorScroll)
@@ -369,9 +356,6 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("enter in meta returned cmd %v, want nil", cmd)
 	}
-	if got.explorerIndex != 2 {
-		t.Fatalf("enter in meta reset explorerIndex to %d, want 2", got.explorerIndex)
-	}
 
 	got.focusedPane = navPane
 	next, cmd = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -379,8 +363,8 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter in navigation did not activate selected page")
 	}
-	if got.explorerIndex != 0 {
-		t.Fatalf("enter in navigation left explorerIndex = %d, want reset to 0", got.explorerIndex)
+	if got.inspectorScroll != 0 {
+		t.Fatalf("enter in navigation left inspectorScroll = %d, want reset to 0", got.inspectorScroll)
 	}
 }
 
@@ -411,15 +395,18 @@ func TestEscUnfilteredDoesNotNavigateToRemovedOverview(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	// Inside an open page with explorerIndex > 0 → return to page summary.
+	// Inside an open page, Esc resets transient page state without hidden navigation.
 	m.active = contentTarget{kind: navPage}
 	m.focusedPane = explorerPane
-	m.pageRows = []pageRowViewModel{{}, {}}
-	m.explorerIndex = 1
+	m.loading = true
+	m.inspectorScroll = 3
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	got := next.(model)
-	if got.explorerIndex != 0 {
-		t.Fatalf("esc inside an open page left explorerIndex = %d, want 0", got.explorerIndex)
+	if got.loading {
+		t.Fatal("esc inside an open page left loading=true")
+	}
+	if got.inspectorScroll != 0 {
+		t.Fatalf("esc inside an open page left inspectorScroll = %d, want 0", got.inspectorScroll)
 	}
 	if got.active.kind != navPage {
 		t.Fatalf("esc inside an open page changed active to %v, want it to stay navPage", got.active.kind)
@@ -564,14 +551,94 @@ func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
 	}
 
 	view := scrolling.View()
-	if !strings.Contains(view, "Page number: 1") {
-		t.Fatalf("view did not keep previous page visible during delay; want page %d", firstPage)
+	if !strings.Contains(view, "[3] HEX") {
+		t.Fatalf("view did not render the page pane as HEX during delay:\n%s", view)
 	}
-	if !strings.Contains(view, "STRUCTURES") {
-		t.Fatal("view did not keep the previous page structure table visible during delay")
+	if !strings.Contains(view, "Offset   00 01 02 03 04 05 06 07") ||
+		!strings.Contains(view, "0000") ||
+		!strings.Contains(view, "53 51 4C 69 74 65 20 66  6F 72 6D 61 74 20 33") {
+		t.Fatalf("view did not keep previous page hex bytes visible during delay; want page %d:\n%s", firstPage, view)
+	}
+	if strings.Contains(view, "STRUCTURES") {
+		t.Fatal("view still shows the previous page structure table during delay")
 	}
 	if strings.Contains(view, "Waiting for page details") || strings.Contains(view, "Loading page") {
 		t.Fatal("view showed loading/empty placeholder during the delay")
+	}
+}
+
+func TestPageHexPaneAndMeta(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	view := loaded.View()
+	pagePane := loaded.viewExplorer(80, 8)
+	meta := loaded.viewInspector(60, 20)
+	for _, want := range []string{
+		"[3] HEX",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("page view missing %q:\n%s", want, view)
+		}
+	}
+	for _, want := range []string{
+		"Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F",
+		"0000",
+		"53 51 4C 69 74 65 20 66  6F 72 6D 61 74 20 33 00",
+	} {
+		if !strings.Contains(pagePane, want) {
+			t.Fatalf("page hex pane missing %q:\n%s", want, pagePane)
+		}
+	}
+	for _, want := range []string{
+		"[4] META",
+		"Page 1",
+		"Type: leaf table",
+		"Page size: 4096 bytes",
+		"File offset: 0",
+		"STRUCTURE",
+		"Cells:",
+		"Pointer array:",
+	} {
+		if !strings.Contains(view+"\n"+meta, want) {
+			t.Fatalf("page meta missing %q:\n%s", want, meta)
+		}
+	}
+	for _, dropped := range []string{"STRUCTURES", "RAW BYTES", "ASCII:"} {
+		if strings.Contains(view, dropped) {
+			t.Fatalf("page view still contains removed page detail %q:\n%s", dropped, view)
+		}
+	}
+}
+
+func TestFilteredPageMetaShowsBTreeSource(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	meta := loaded.viewInspector(36, 20)
+	for _, want := range []string{"BTREE", "Object: companies", "Root page: 2"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("filtered page meta missing %q:\n%s", want, meta)
+		}
+	}
+	if strings.Contains(meta, "ASCII:") || strings.Contains(meta, "RAW BYTES") {
+		t.Fatalf("filtered page meta contains raw byte detail:\n%s", meta)
 	}
 }
 
