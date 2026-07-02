@@ -72,6 +72,7 @@ type model struct {
 	focusedPane     pane
 	selectedBlock   int
 	blockSelected   bool
+	drill           drillState
 	hexScroll       int
 	width           int
 	height          int
@@ -222,6 +223,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.currentPage = msg.page
 		m.validateBlockSelection()
+		m.validateDrillSelection()
 		if m.focusedPane == explorerPane {
 			m.selectFirstHexBlockIfNeeded()
 		}
@@ -304,6 +306,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "d":
+		if m.active.kind == navPage {
+			m.drillIn()
+		}
+		return m, nil
+	case "b":
+		if m.active.kind == navPage {
+			m.drillBack()
+		}
+		return m, nil
 	case "enter":
 		if m.focusedPane == navPane {
 			return m.activateSelected()
@@ -314,6 +326,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(-1) {
 				return m.activateSelected()
 			}
+		} else if m.active.kind == navPage && m.drill.active {
+			m.moveDrillChild(-1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveHexBlock(-1)
 		} else if m.focusedPane == inspectorPane {
@@ -325,6 +339,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(1) {
 				return m.activateSelected()
 			}
+		} else if m.active.kind == navPage && m.drill.active {
+			m.moveDrillChild(1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveHexBlock(1)
 		} else if m.focusedPane == inspectorPane {
@@ -419,6 +435,7 @@ func (m *model) scrollInspector(direction int, amount int) {
 func (m *model) resetHexSelection() {
 	m.selectedBlock = 0
 	m.blockSelected = false
+	m.drill = drillState{}
 	m.hexScroll = 0
 }
 
@@ -451,6 +468,38 @@ func (m *model) validateBlockSelection() {
 	}
 }
 
+func (m *model) validateDrillSelection() {
+	if !m.drill.active {
+		return
+	}
+	blocks := m.currentPageBlocks()
+	if m.drill.parentBlock < 0 || m.drill.parentBlock >= len(blocks) {
+		m.drill = drillState{}
+		return
+	}
+	children := buildDrillChildren(blocks[m.drill.parentBlock], m.currentPage)
+	if len(children) == 0 {
+		m.drill = drillState{}
+		return
+	}
+	if len(m.drill.stack) == 0 {
+		m.drill.stack = []drillFrame{{title: blocks[m.drill.parentBlock].title(), children: children}}
+	}
+	m.selectedBlock = m.drill.parentBlock
+	m.blockSelected = true
+	m.cloneDrillStack()
+	for idx := range m.drill.stack {
+		if len(m.drill.stack[idx].children) == 0 {
+			m.drill.stack = m.drill.stack[:idx]
+			break
+		}
+		m.drill.stack[idx].selectedChild = clamp(m.drill.stack[idx].selectedChild, 0, len(m.drill.stack[idx].children)-1)
+	}
+	if len(m.drill.stack) == 0 {
+		m.drill = drillState{}
+	}
+}
+
 func (m *model) moveHexBlock(delta int) {
 	blocks := m.currentPageBlocks()
 	if len(blocks) == 0 {
@@ -473,12 +522,109 @@ func (m *model) moveHexBlock(delta int) {
 	m.revealSelectedHexBlock()
 }
 
+func (m *model) drillIn() {
+	if !m.drill.active {
+		m.enterDrill()
+		return
+	}
+	child, ok := m.selectedDrillChild()
+	if ok && len(child.children) > 0 {
+		m.cloneDrillStack()
+		m.drill.stack = append(m.drill.stack, drillFrame{
+			title:    child.title,
+			children: child.children,
+		})
+		m.inspectorScroll = 0
+		m.revealSelectedDrillChild()
+		return
+	}
+}
+
+func (m *model) enterDrill() {
+	block, ok := m.selectedPageBlock()
+	if !ok {
+		return
+	}
+	children := buildDrillChildren(block, m.currentPage)
+	if len(children) == 0 {
+		return
+	}
+	m.drill = drillState{
+		active:      true,
+		parentBlock: m.selectedBlock,
+		stack: []drillFrame{{
+			title:    block.title(),
+			children: children,
+		}},
+	}
+	m.blockSelected = true
+	m.inspectorScroll = 0
+	m.revealSelectedDrillChild()
+}
+
+func (m *model) drillBack() {
+	if !m.drill.active {
+		return
+	}
+	if len(m.drill.stack) > 1 {
+		m.cloneDrillStack()
+		m.drill.stack = m.drill.stack[:len(m.drill.stack)-1]
+		m.inspectorScroll = 0
+		m.revealSelectedDrillChild()
+		return
+	}
+
+	parent := m.drill.parentBlock
+	m.drill = drillState{}
+	blocks := m.currentPageBlocks()
+	if len(blocks) == 0 {
+		m.resetHexSelection()
+		return
+	}
+	m.selectedBlock = clamp(parent, 0, len(blocks)-1)
+	m.blockSelected = true
+	m.inspectorScroll = 0
+	m.revealSelectedHexBlock()
+}
+
+func (m *model) moveDrillChild(delta int) {
+	children := m.currentDrillChildren()
+	if len(children) == 0 {
+		m.drill = drillState{}
+		return
+	}
+	m.cloneDrillStack()
+	frame := &m.drill.stack[len(m.drill.stack)-1]
+	next := clamp(frame.selectedChild+delta, 0, len(children)-1)
+	if next == frame.selectedChild {
+		return
+	}
+	frame.selectedChild = next
+	m.inspectorScroll = 0
+	m.revealSelectedDrillChild()
+}
+
+func (m *model) cloneDrillStack() {
+	if len(m.drill.stack) == 0 {
+		return
+	}
+	m.drill.stack = append([]drillFrame(nil), m.drill.stack...)
+}
+
 func (m *model) revealSelectedHexBlock() {
 	blocks := m.currentPageBlocks()
 	if !m.blockSelected || m.selectedBlock < 0 || m.selectedBlock >= len(blocks) {
 		return
 	}
-	m.hexScroll = revealHexBlockScroll(m.hexScroll, blocks[m.selectedBlock], m.hexDataRows())
+	m.hexScroll = revealHexMetaScroll(m.hexScroll, blocks[m.selectedBlock].meta, m.hexDataRows())
+}
+
+func (m *model) revealSelectedDrillChild() {
+	child, ok := m.selectedDrillChild()
+	if !ok {
+		return
+	}
+	m.hexScroll = revealHexMetaScroll(m.hexScroll, child.meta, m.hexDataRows())
 }
 
 func (m model) hexDataRows() int {
@@ -580,24 +726,64 @@ func (m model) View() string {
 	return strings.Join(lines, "\n")
 }
 
-// Persistent key-hint bars. The hints are always visible in the footer; the contextual
-// segment (a transient status, or the filter token while filtered) is prepended to them.
-const (
-	navKeys    = "↑↓ move · f filter · q quit"
-	filterKeys = "f clear/switch · ↑↓ move · q quit"
-)
-
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
 // While filtered the context is the filter token (and the filter-aware key set); otherwise
 // it is the latest transient status, if any.
 func (m model) footerLine() string {
+	keys := m.footerKeyHints()
 	if m.isFiltered() {
-		return m.filterToken() + "  |  " + filterKeys
+		return m.filterToken() + "  |  " + keys
 	}
 	if m.status != "" {
-		return m.status + "  |  " + navKeys
+		return m.status + "  |  " + keys
 	}
-	return navKeys
+	return keys
+}
+
+func (m model) footerKeyHints() string {
+	hints := []string{"↑↓ move"}
+	if m.canDrillIn() {
+		hints = append(hints, "d drill")
+	}
+	if m.canDrillBack() {
+		hints = append(hints, "b back")
+	}
+	if m.canFilterFromFooter() {
+		if m.isFiltered() {
+			hints = append(hints, "f clear/switch")
+		} else {
+			hints = append(hints, "f filter")
+		}
+	}
+	hints = append(hints, "q quit")
+	return strings.Join(hints, " · ")
+}
+
+func (m model) canDrillIn() bool {
+	if m.active.kind != navPage {
+		return false
+	}
+	if !m.drill.active {
+		block, ok := m.selectedPageBlock()
+		if !ok {
+			return false
+		}
+		return len(buildDrillChildren(block, m.currentPage)) > 0
+	}
+	child, ok := m.selectedDrillChild()
+	return ok && len(child.children) > 0
+}
+
+func (m model) canDrillBack() bool {
+	return m.active.kind == navPage && m.drill.active
+}
+
+func (m model) canFilterFromFooter() bool {
+	if m.focusedPane != navPane {
+		return false
+	}
+	item := m.selectedItem()
+	return (item.kind == navTable || item.kind == navIndex) && item.schema != nil
 }
 
 func insetLine(line string, left int, width int) string {
@@ -875,6 +1061,9 @@ func (m model) detailHeaderText() string {
 
 func (m model) metaHeaderText() string {
 	if m.active.kind == navPage {
+		if child, ok := m.selectedDrillChild(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+			return child.title
+		}
 		if block, ok := m.selectedPageBlock(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
 			return block.title()
 		}
@@ -1091,6 +1280,9 @@ func (m model) viewPageMeta() string {
 	}
 
 	page := m.currentPage
+	if child, ok := m.selectedDrillChild(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+		return strings.Join(drillChildMetaLines(child), "\n")
+	}
 	if block, ok := m.selectedPageBlock(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
 		return strings.Join(blockMetaLines(block, page), "\n")
 	}
@@ -1153,6 +1345,29 @@ func (m model) selectedPageBlock() (pageBlock, bool) {
 		return pageBlock{}, false
 	}
 	return blocks[m.selectedBlock], true
+}
+
+func (m model) currentDrillChildren() []drillChild {
+	if !m.drill.active || m.currentPage == nil || len(m.drill.stack) == 0 {
+		return nil
+	}
+	blocks := m.currentPageBlocks()
+	if m.drill.parentBlock < 0 || m.drill.parentBlock >= len(blocks) {
+		return nil
+	}
+	return m.drill.stack[len(m.drill.stack)-1].children
+}
+
+func (m model) selectedDrillChild() (drillChild, bool) {
+	children := m.currentDrillChildren()
+	if len(m.drill.stack) == 0 {
+		return drillChild{}, false
+	}
+	selected := m.drill.stack[len(m.drill.stack)-1].selectedChild
+	if selected < 0 || selected >= len(children) {
+		return drillChild{}, false
+	}
+	return children[selected], true
 }
 
 func paneInnerWidth(outerWidth int) int {
@@ -1239,26 +1454,44 @@ func (m model) renderHexRows(width int, height int) []string {
 
 	lines := []string{hexOffsetStyle.Render(truncateCells("Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F", width))}
 	blocks := buildPageBlocks(m.currentPage)
-	selected := -1
-	if m.blockSelected && m.selectedBlock >= 0 && m.selectedBlock < len(blocks) {
-		selected = m.selectedBlock
-	}
+	selectedMeta, hasSelectedMeta := m.selectedHexMeta(blocks)
+	drillChildren := m.currentDrillChildren()
 	dataRows := max(0, height-1)
 	scroll := clamp(m.hexScroll, 0, max(0, (len(raw)+15)/16-dataRows))
-	if selected >= 0 {
-		scroll = revealHexBlockScroll(scroll, blocks[selected], dataRows)
+	if hasSelectedMeta {
+		scroll = revealHexMetaScroll(scroll, selectedMeta, dataRows)
 	}
 	for offset := scroll * 16; offset < len(raw) && len(lines) < height; offset += 16 {
 		end := offset + 16
 		if end > len(raw) {
 			end = len(raw)
 		}
-		lines = append(lines, truncateCells(formatHexRow(offset, raw[offset:end], blocks, selected), width))
+		lines = append(lines, truncateCells(formatHexRowWithSelection(offset, raw[offset:end], blocks, selectedMeta, hasSelectedMeta, drillChildren), width))
 	}
 	return lines
 }
 
+func (m model) selectedHexMeta(blocks []pageBlock) (sqlite.Meta, bool) {
+	if child, ok := m.selectedDrillChild(); ok {
+		return child.meta, true
+	}
+	if m.blockSelected && m.selectedBlock >= 0 && m.selectedBlock < len(blocks) {
+		return blocks[m.selectedBlock].meta, true
+	}
+	return sqlite.Meta{}, false
+}
+
 func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) string {
+	selectedMeta := sqlite.Meta{}
+	hasSelectedMeta := false
+	if selected >= 0 && selected < len(blocks) {
+		selectedMeta = blocks[selected].meta
+		hasSelectedMeta = true
+	}
+	return formatHexRowWithSelection(offset, chunk, blocks, selectedMeta, hasSelectedMeta, nil)
+}
+
+func formatHexRowWithSelection(offset int, chunk []byte, blocks []pageBlock, selectedMeta sqlite.Meta, hasSelectedMeta bool, drillChildren []drillChild) string {
 	var b strings.Builder
 	b.WriteString(hexOffsetStyle.Render(fmt.Sprintf("%04X     ", offset)))
 	for idx := 0; idx < 16; idx++ {
@@ -1272,7 +1505,7 @@ func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) st
 		if idx < len(chunk) {
 			byteOffset := offset + idx
 			token := fmt.Sprintf("%02X", chunk[idx])
-			b.WriteString(styleHexByte(token, byteOffset, blocks, selected))
+			b.WriteString(styleHexByte(token, byteOffset, blocks, selectedMeta, hasSelectedMeta, drillChildren))
 		} else {
 			b.WriteString("  ")
 		}
@@ -1280,13 +1513,18 @@ func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) st
 	return b.String()
 }
 
-func styleHexByte(token string, offset int, blocks []pageBlock, selected int) string {
-	for idx, block := range blocks {
+func styleHexByte(token string, offset int, blocks []pageBlock, selectedMeta sqlite.Meta, hasSelectedMeta bool, drillChildren []drillChild) string {
+	if hasSelectedMeta && offset >= selectedMeta.StartOffset && offset < selectedMeta.EndOffset() {
+		return selectedHexByteStyle.Render(token)
+	}
+	for _, child := range drillChildren {
+		if offset >= child.meta.StartOffset && offset < child.meta.EndOffset() {
+			return drillChildStyle(child.kind).Render(token)
+		}
+	}
+	for _, block := range blocks {
 		if offset < block.meta.StartOffset || offset >= block.meta.EndOffset() {
 			continue
-		}
-		if idx == selected {
-			return selectedHexByteStyle.Render(token)
 		}
 		return blockStyle(block.kind).Render(token)
 	}
@@ -1305,26 +1543,57 @@ func metaFrameTitle(title string) string {
 }
 
 var (
-	sectionStyle               = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	navSectionTitleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	activeNavSectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
-	statusStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
-	navItemStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	selectedNavItemStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
-	mutedStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	hexOffsetStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
-	unknownHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	dbHeaderHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
-	pageHeaderHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	pointerArrayHexByteStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
-	freeblockHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
-	unallocatedHexByteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	cellHexByteStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
-	selectedHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("25")).Bold(true)
-	errorStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	scrollbarTrackStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	scrollbarThumbStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	sectionStyle                 = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
+	navSectionTitleStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
+	activeNavSectionTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
+	statusStyle                  = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
+	navItemStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	selectedNavItemStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
+	mutedStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	hexOffsetStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	unknownHexByteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	dbHeaderHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	pageHeaderHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	pointerArrayHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	freeblockHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	unallocatedHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	cellHexByteStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
+	selectedHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("25")).Bold(true)
+	payloadSizeHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	rowIDHexByteStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
+	leftChildPageHexByteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	recordPayloadHexByteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("120"))
+	recordHeaderSizeHexByteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("229"))
+	serialTypeHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("183"))
+	recordValueHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	overflowPointerHexByteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	errorStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	scrollbarTrackStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
+
+func drillChildStyle(kind drillChildKind) lipgloss.Style {
+	switch kind {
+	case drillChildPayloadSize:
+		return payloadSizeHexByteStyle
+	case drillChildRowID:
+		return rowIDHexByteStyle
+	case drillChildLeftChildPage:
+		return leftChildPageHexByteStyle
+	case drillChildRecordPayload:
+		return recordPayloadHexByteStyle
+	case drillChildRecordHeaderSize:
+		return recordHeaderSizeHexByteStyle
+	case drillChildSerialType:
+		return serialTypeHexByteStyle
+	case drillChildRecordValue:
+		return recordValueHexByteStyle
+	case drillChildOverflowPointer:
+		return overflowPointerHexByteStyle
+	default:
+		return cellHexByteStyle
+	}
+}
 
 func blockStyle(kind pageBlockKind) lipgloss.Style {
 	switch kind {

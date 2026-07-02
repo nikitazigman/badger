@@ -95,11 +95,15 @@ func (b pageBlock) title() string {
 }
 
 func revealHexBlockScroll(scroll int, block pageBlock, dataRows int) int {
+	return revealHexMetaScroll(scroll, block.meta, dataRows)
+}
+
+func revealHexMetaScroll(scroll int, meta sqlite.Meta, dataRows int) int {
 	if dataRows <= 0 {
 		return scroll
 	}
-	startRow := block.meta.StartOffset / 16
-	endRow := max(startRow, (block.meta.EndOffset()-1)/16)
+	startRow := meta.StartOffset / 16
+	endRow := max(startRow, (meta.EndOffset()-1)/16)
 	if startRow < scroll {
 		return startRow
 	}
