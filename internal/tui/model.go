@@ -54,6 +54,13 @@ type contentTarget struct {
 	schemaName string
 }
 
+type pageMetaSource int
+
+const (
+	pageMetaFromPages pageMetaSource = iota
+	pageMetaFromHex
+)
+
 // filterSource identifies the single object PAGES is scoped to. It stores the object
 // only; the page set and skip diagnostics are derived from pageIndex on demand (the DB is
 // read-only and the index is immutable once built, so there is nothing to snapshot).
@@ -73,6 +80,7 @@ type model struct {
 	selectedBlock   int
 	blockSelected   bool
 	drill           drillState
+	metaSource      pageMetaSource
 	hexScroll       int
 	width           int
 	height          int
@@ -283,11 +291,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		m.focusedPane = explorerPane
 		if m.active.kind == navPage {
+			m.metaSource = pageMetaFromHex
 			m.selectFirstHexBlockIfNeeded()
 			m.revealSelectedHexBlock()
 		}
 		return m, nil
 	case "4":
+		if m.active.kind == navPage {
+			switch m.focusedPane {
+			case navPane:
+				m.metaSource = pageMetaFromPages
+			case explorerPane:
+				m.metaSource = pageMetaFromHex
+			}
+		}
 		m.focusedPane = inspectorPane
 		return m, nil
 	case "f":
@@ -326,7 +343,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(-1) {
 				return m.activateSelected()
 			}
-		} else if m.active.kind == navPage && m.drill.active {
+		} else if m.focusedPane == explorerPane && m.active.kind == navPage && m.drill.active {
 			m.moveDrillChild(-1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveHexBlock(-1)
@@ -339,7 +356,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(1) {
 				return m.activateSelected()
 			}
-		} else if m.active.kind == navPage && m.drill.active {
+		} else if m.focusedPane == explorerPane && m.active.kind == navPage && m.drill.active {
 			m.moveDrillChild(1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.moveHexBlock(1)
@@ -663,6 +680,7 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	case navPage:
 		m.active.pageNumber = item.pageNumber
 		m.inspectorScroll = 0
+		m.metaSource = pageMetaFromPages
 		m.loading = true
 		m.loadingVisible = false
 		m.status = ""
@@ -1061,15 +1079,25 @@ func (m model) detailHeaderText() string {
 
 func (m model) metaHeaderText() string {
 	if m.active.kind == navPage {
-		if child, ok := m.selectedDrillChild(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+		if child, ok := m.selectedDrillChild(); ok && m.pageMetaUsesHexSelection() {
 			return child.title
 		}
-		if block, ok := m.selectedPageBlock(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+		if block, ok := m.selectedPageBlock(); ok && m.pageMetaUsesHexSelection() {
 			return block.title()
 		}
 		return fmt.Sprintf("page %d", m.inspectorPageNumber())
 	}
 	return m.selectedItem().title
+}
+
+func (m model) pageMetaUsesHexSelection() bool {
+	if m.active.kind != navPage {
+		return false
+	}
+	if m.focusedPane == explorerPane {
+		return true
+	}
+	return m.focusedPane == inspectorPane && m.metaSource == pageMetaFromHex
 }
 
 func (m model) viewOverview(width int) []string {
@@ -1254,8 +1282,6 @@ func (m model) viewInspector(width int, height int) string {
 			"",
 			sectionStyle.Render("ACTIONS"),
 			"- move in navigation to load pages",
-			"- [ previous page",
-			"- ] next page",
 		)
 	}
 
@@ -1280,10 +1306,10 @@ func (m model) viewPageMeta() string {
 	}
 
 	page := m.currentPage
-	if child, ok := m.selectedDrillChild(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+	if child, ok := m.selectedDrillChild(); ok && m.pageMetaUsesHexSelection() {
 		return strings.Join(drillChildMetaLines(child), "\n")
 	}
-	if block, ok := m.selectedPageBlock(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+	if block, ok := m.selectedPageBlock(); ok && m.pageMetaUsesHexSelection() {
 		return strings.Join(blockMetaLines(block, page), "\n")
 	}
 
