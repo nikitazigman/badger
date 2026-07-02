@@ -75,12 +75,7 @@ Examples:
 
 Badger opens directly into an interactive TUI.
 
-<!--
-Navigation demo video placeholder:
-Upload the demo video in the PR, then replace this comment with the GitHub asset URL.
-Example:
-https://github.com/user-attachments/assets/REPLACE_WITH_VIDEO_ID
--->
+https://github.com/user-attachments/assets/f069f4f8-37b1-4748-ad33-55c68fe0ae27
 
 The interface has three panes:
 
