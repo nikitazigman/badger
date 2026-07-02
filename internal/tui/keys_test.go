@@ -766,6 +766,328 @@ func TestCellBlockMetaShowsParsedValues(t *testing.T) {
 	}
 }
 
+func TestCellDrillToggleMovementAndMeta(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	parent := selectFirstDrillableBlock(t, &hex)
+	children := buildDrillChildren(hex.currentPageBlocks()[parent], hex.currentPage)
+	for _, want := range []string{"Payload Size", "Record Payload"} {
+		if !hasDrillChildTitle(children, want) {
+			t.Fatalf("drill children missing %q: %+v", want, children)
+		}
+	}
+	payloadIdx := drillChildIndex(children, "Record Payload")
+	if payloadIdx < 0 {
+		t.Fatal("drill children missing Record Payload")
+	}
+	for _, want := range []string{"Record Header Size", "Serial Type 1", "Value 1"} {
+		if !hasDrillChildTitle(children[payloadIdx].children, want) {
+			t.Fatalf("record payload children missing %q: %+v", want, children[payloadIdx].children)
+		}
+	}
+
+	next, cmd = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+	if cmd != nil {
+		t.Fatal("d returned a command")
+	}
+	if !drilled.drill.active {
+		t.Fatal("d on a drillable cell did not enter drill mode")
+	}
+	if drilled.drill.parentBlock != parent || drilled.selectedBlock != parent {
+		t.Fatalf("drill parent/selected block = %d/%d, want %d", drilled.drill.parentBlock, drilled.selectedBlock, parent)
+	}
+	if len(drilled.drill.stack) != 1 {
+		t.Fatalf("drill stack depth = %d, want 1", len(drilled.drill.stack))
+	}
+
+	first, ok := drilled.selectedDrillChild()
+	if !ok {
+		t.Fatal("drill mode has no selected child")
+	}
+	meta := drilled.viewInspector(52, 14)
+	for _, want := range []string{first.title, "Parent: Cell", "Offset:", "Size:", "PARSED"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("drill meta missing %q:\n%s", want, meta)
+		}
+	}
+
+	second := children[1]
+	rowOffset := (second.meta.StartOffset / 16) * 16
+	rowEnd := rowOffset + 16
+	if rowEnd > len(drilled.currentPage.BTreePage.Raw) {
+		rowEnd = len(drilled.currentPage.BTreePage.Raw)
+	}
+	rendered := formatHexRowWithSelection(rowOffset, drilled.currentPage.BTreePage.Raw[rowOffset:rowEnd], drilled.currentPageBlocks(), first.meta, true, drilled.currentDrillChildren())
+	wantSiblingByte := drillChildStyle(second.kind).Render(fmt.Sprintf("%02X", drilled.currentPage.BTreePage.Raw[second.meta.StartOffset]))
+	if !strings.Contains(rendered, wantSiblingByte) {
+		t.Fatalf("unselected drill sibling byte did not use drill child style:\n%s", rendered)
+	}
+
+	next, cmd = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	moved := next.(model)
+	if cmd != nil {
+		t.Fatal("drill down returned a command")
+	}
+	if moved.drill.stack[len(moved.drill.stack)-1].selectedChild != drilled.drill.stack[len(drilled.drill.stack)-1].selectedChild+1 {
+		t.Fatalf("drill down selected child %d, want %d", moved.drill.stack[len(moved.drill.stack)-1].selectedChild, drilled.drill.stack[len(drilled.drill.stack)-1].selectedChild+1)
+	}
+	selectedAfterMove, ok := moved.selectedDrillChild()
+	if !ok {
+		t.Fatal("drill down left no selected child")
+	}
+	if selectedAfterMove.title == first.title && selectedAfterMove.meta == first.meta {
+		t.Fatalf("drill down did not change selected child: %+v", selectedAfterMove)
+	}
+	if meta := moved.viewInspector(52, 14); !strings.Contains(meta, selectedAfterMove.title) {
+		t.Fatalf("drill movement did not update META to %q:\n%s", selectedAfterMove.title, meta)
+	}
+
+	for moved.drill.stack[len(moved.drill.stack)-1].selectedChild < payloadIdx {
+		next, _ = moved.Update(tea.KeyMsg{Type: tea.KeyDown})
+		moved = next.(model)
+	}
+	selectedPayload, ok := moved.selectedDrillChild()
+	if !ok || selectedPayload.title != "Record Payload" {
+		t.Fatalf("selected child = %+v, want Record Payload", selectedPayload)
+	}
+
+	next, cmd = moved.Update(keyMsg("d"))
+	nested := next.(model)
+	if cmd != nil {
+		t.Fatal("d on Record Payload returned a command")
+	}
+	if !nested.drill.active || len(nested.drill.stack) != 2 {
+		t.Fatalf("d on Record Payload did not enter nested drill; state=%+v", nested.drill)
+	}
+	nestedChild, ok := nested.selectedDrillChild()
+	if !ok || nestedChild.title != "Record Header Size" {
+		t.Fatalf("nested selected child = %+v, want Record Header Size", nestedChild)
+	}
+	if meta := nested.viewInspector(52, 14); !strings.Contains(meta, "Parent: Record Payload") {
+		t.Fatalf("nested drill meta missing payload parent:\n%s", meta)
+	}
+
+	rowOffset = (nestedChild.meta.StartOffset / 16) * 16
+	rowEnd = rowOffset + 16
+	if rowEnd > len(nested.currentPage.BTreePage.Raw) {
+		rowEnd = len(nested.currentPage.BTreePage.Raw)
+	}
+	rendered = formatHexRowWithSelection(rowOffset, nested.currentPage.BTreePage.Raw[rowOffset:rowEnd], nested.currentPageBlocks(), nestedChild.meta, true, nested.currentDrillChildren())
+	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", nested.currentPage.BTreePage.Raw[nestedChild.meta.StartOffset]))
+	if !strings.Contains(rendered, wantByte) {
+		t.Fatalf("selected nested drill child byte did not use selected style:\n%s", rendered)
+	}
+
+	next, cmd = nested.Update(keyMsg("d"))
+	stillNested := next.(model)
+	if cmd != nil {
+		t.Fatal("d on nested leaf returned a command")
+	}
+	if !stillNested.drill.active || len(stillNested.drill.stack) != 2 {
+		t.Fatalf("d on nested leaf changed drill state; state=%+v", stillNested.drill)
+	}
+
+	next, cmd = stillNested.Update(keyMsg("b"))
+	backToCell := next.(model)
+	if cmd != nil {
+		t.Fatal("b in nested drill returned a command")
+	}
+	if !backToCell.drill.active || len(backToCell.drill.stack) != 1 {
+		t.Fatalf("b in nested drill did not return to parent drill; state=%+v", backToCell.drill)
+	}
+
+	backToCell.drill.stack[0].selectedChild = 0
+	next, cmd = backToCell.Update(keyMsg("d"))
+	leafNoop := next.(model)
+	if cmd != nil {
+		t.Fatal("d on non-nested drill child returned a command")
+	}
+	if !leafNoop.drill.active || len(leafNoop.drill.stack) != 1 {
+		t.Fatalf("d on non-nested leaf changed drill state; state=%+v", leafNoop.drill)
+	}
+
+	next, cmd = leafNoop.Update(keyMsg("b"))
+	exited := next.(model)
+	if cmd != nil {
+		t.Fatal("b at top drill layer returned a command")
+	}
+	if exited.drill.active {
+		t.Fatal("b at top drill layer did not exit drill mode")
+	}
+	if exited.selectedBlock != parent {
+		t.Fatalf("exiting drill selected block %d, want parent %d", exited.selectedBlock, parent)
+	}
+}
+
+func TestFooterDrillHintsAreContextual(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	if strings.Contains(m.footerLine(), "d drill") || strings.Contains(m.footerLine(), "b back") {
+		t.Fatalf("footer shows drill hints before a drillable page selection: %q", m.footerLine())
+	}
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	hex.selectedBlock = 0
+	hex.blockSelected = true
+	if strings.Contains(hex.footerLine(), "d drill") || strings.Contains(hex.footerLine(), "b back") {
+		t.Fatalf("footer shows drill hints on non-drillable block: %q", hex.footerLine())
+	}
+
+	selectFirstDrillableBlock(t, &hex)
+	if !strings.Contains(hex.footerLine(), "d drill") {
+		t.Fatalf("footer missing drill hint on drillable cell: %q", hex.footerLine())
+	}
+	if strings.Contains(hex.footerLine(), "b back") {
+		t.Fatalf("footer shows back before entering drill: %q", hex.footerLine())
+	}
+
+	next, _ = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+	if strings.Contains(drilled.footerLine(), "d drill") {
+		t.Fatalf("footer shows drill hint on leaf drill child: %q", drilled.footerLine())
+	}
+	if !strings.Contains(drilled.footerLine(), "b back") {
+		t.Fatalf("footer missing back hint while drilled: %q", drilled.footerLine())
+	}
+
+	payloadIdx := drillChildIndex(drilled.currentDrillChildren(), "Record Payload")
+	for drilled.drill.stack[len(drilled.drill.stack)-1].selectedChild < payloadIdx {
+		next, _ = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+		drilled = next.(model)
+	}
+	if !strings.Contains(drilled.footerLine(), "d drill") || !strings.Contains(drilled.footerLine(), "b back") {
+		t.Fatalf("footer should show both hints on nested drillable child: %q", drilled.footerLine())
+	}
+
+	next, _ = drilled.Update(keyMsg("d"))
+	nested := next.(model)
+	if !strings.Contains(nested.footerLine(), "b back") {
+		t.Fatalf("footer missing back hint in nested drill: %q", nested.footerLine())
+	}
+	if strings.Contains(nested.footerLine(), "d drill") {
+		t.Fatalf("footer shows drill hint on nested leaf: %q", nested.footerLine())
+	}
+}
+
+func TestFooterFilterHintIsContextualToViewOne(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, _ := m.Update(keyMsg("1"))
+	btrees := next.(model)
+	if !strings.Contains(btrees.footerLine(), "f filter") {
+		t.Fatalf("footer missing filter hint in view 1: %q", btrees.footerLine())
+	}
+
+	next, cmd := btrees.Update(keyMsg("2"))
+	pages := next.(model)
+	if cmd == nil {
+		t.Fatal("2 did not activate a page")
+	}
+	if strings.Contains(pages.footerLine(), "f filter") || strings.Contains(pages.footerLine(), "f clear/switch") {
+		t.Fatalf("footer shows filter hint outside view 1: %q", pages.footerLine())
+	}
+
+	next, _ = pages.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	if strings.Contains(hex.footerLine(), "f filter") || strings.Contains(hex.footerLine(), "f clear/switch") {
+		t.Fatalf("footer shows filter hint in HEX view: %q", hex.footerLine())
+	}
+}
+
+func TestDrillNoOpAndPageChangeReset(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	hex.selectedBlock = 0
+	hex.blockSelected = true
+	next, cmd = hex.Update(keyMsg("d"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatal("d on non-drillable block returned a command")
+	}
+	if got.drill.active {
+		t.Fatal("d on non-drillable block entered drill mode")
+	}
+	if got.selectedBlock != 0 || !got.blockSelected {
+		t.Fatalf("d on non-drillable block changed selection to (%v, %d)", got.blockSelected, got.selectedBlock)
+	}
+
+	parent := selectFirstDrillableBlock(t, &got)
+	next, _ = got.Update(keyMsg("d"))
+	drilled := next.(model)
+	if !drilled.drill.active || drilled.drill.parentBlock != parent {
+		t.Fatal("setup: failed to enter drill mode")
+	}
+
+	drilled.focusedPane = navPane
+	next, cmd = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	movingPage := next.(model)
+	if cmd == nil {
+		t.Fatal("moving to next page did not return a load command")
+	}
+	if movingPage.drill.active {
+		t.Fatal("page movement left drill mode active")
+	}
+	if movingPage.blockSelected {
+		t.Fatal("page movement left a selected hex block")
+	}
+}
+
+func TestDrillSubtypeStylesAreContrasting(t *testing.T) {
+	t.Parallel()
+
+	rendered := map[string]string{
+		"payload size": fmt.Sprint(drillChildStyle(drillChildPayloadSize).GetForeground()),
+		"rowid":        fmt.Sprint(drillChildStyle(drillChildRowID).GetForeground()),
+		"payload":      fmt.Sprint(drillChildStyle(drillChildRecordPayload).GetForeground()),
+	}
+
+	for leftName, left := range rendered {
+		for rightName, right := range rendered {
+			if leftName >= rightName {
+				continue
+			}
+			if left == right {
+				t.Fatalf("%s and %s render with the same style %q", leftName, rightName, left)
+			}
+		}
+	}
+}
+
 func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 	t.Parallel()
 
@@ -812,6 +1134,35 @@ func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 	if !strings.Contains(rendered, wantByte) {
 		t.Fatalf("selected block byte did not use selected style:\n%s", rendered)
 	}
+}
+
+func selectFirstDrillableBlock(t *testing.T, m *model) int {
+	t.Helper()
+	for idx, block := range m.currentPageBlocks() {
+		if len(buildDrillChildren(block, m.currentPage)) == 0 {
+			continue
+		}
+		m.selectedBlock = idx
+		m.blockSelected = true
+		m.drill = drillState{}
+		m.revealSelectedHexBlock()
+		return idx
+	}
+	t.Fatal("fixture page has no drillable cell block")
+	return -1
+}
+
+func hasDrillChildTitle(children []drillChild, title string) bool {
+	return drillChildIndex(children, title) >= 0
+}
+
+func drillChildIndex(children []drillChild, title string) int {
+	for idx, child := range children {
+		if child.title == title {
+			return idx
+		}
+	}
+	return -1
 }
 
 func TestPageMovementResetsHexSelection(t *testing.T) {
@@ -889,6 +1240,9 @@ func TestVisibleJumpLabels(t *testing.T) {
 		if strings.Contains(view, dropped) {
 			t.Fatalf("footer still advertises removed hint %q", dropped)
 		}
+	}
+	if strings.Contains(m.footerLine(), "d drill") || strings.Contains(m.footerLine(), "b back") {
+		t.Fatalf("footer shows drill hints without a drillable selection: %q", m.footerLine())
 	}
 	for _, label := range []string{"[1] b-trees", "[2] pages", "[3] detail", "[4] meta"} {
 		if strings.Contains(m.footerLine(), label) {
