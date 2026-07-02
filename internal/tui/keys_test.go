@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -639,6 +640,205 @@ func TestFilteredPageMetaShowsBTreeSource(t *testing.T) {
 	}
 	if strings.Contains(meta, "ASCII:") || strings.Contains(meta, "RAW BYTES") {
 		t.Fatalf("filtered page meta contains raw byte detail:\n%s", meta)
+	}
+}
+
+func TestPageBlocksArePhysicalOrder(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	blocks := buildPageBlocks(loaded.currentPage)
+	if len(blocks) < 4 {
+		t.Fatalf("loaded page has %d blocks, want at least database header, page header, pointer array, and data", len(blocks))
+	}
+	if blocks[0].kind != pageBlockDatabaseHeader || blocks[0].meta.StartOffset != 0 || blocks[0].meta.Size != 100 {
+		t.Fatalf("first block = %+v, want 100-byte database header at offset 0", blocks[0])
+	}
+	if blocks[1].kind != pageBlockPageHeader || blocks[1].meta.StartOffset != 100 {
+		t.Fatalf("second block = %+v, want page header at offset 100", blocks[1])
+	}
+	for idx := 1; idx < len(blocks); idx++ {
+		if blocks[idx].meta.StartOffset < blocks[idx-1].meta.StartOffset {
+			t.Fatalf("blocks are not sorted physically at %d: prev=%+v current=%+v", idx, blocks[idx-1], blocks[idx])
+		}
+	}
+}
+
+func TestHexFocusAndMovementSelectTopLevelBlocks(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	next, cmd = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	if cmd != nil {
+		t.Fatal("3 returned a command")
+	}
+	if hex.focusedPane != explorerPane {
+		t.Fatalf("3 focused pane = %v, want explorerPane", hex.focusedPane)
+	}
+	if !hex.blockSelected || hex.selectedBlock != 0 {
+		t.Fatalf("3 selected block = (%v, %d), want first block", hex.blockSelected, hex.selectedBlock)
+	}
+	if meta := hex.viewInspector(48, 12); !strings.Contains(meta, "Database Header") || !strings.Contains(meta, "Page size:") {
+		t.Fatalf("hex focus did not switch META to first block:\n%s", meta)
+	}
+
+	hex.inspectorScroll = 3
+	next, cmd = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+	moved := next.(model)
+	if cmd != nil {
+		t.Fatal("hex down returned a command")
+	}
+	if moved.selectedBlock != 1 {
+		t.Fatalf("hex down selected block %d, want 1", moved.selectedBlock)
+	}
+	if moved.inspectorScroll != 0 {
+		t.Fatalf("hex movement left inspectorScroll = %d, want reset", moved.inspectorScroll)
+	}
+	if meta := moved.viewInspector(48, 12); !strings.Contains(meta, "Page Header") || !strings.Contains(meta, "Page kind:") {
+		t.Fatalf("hex movement did not switch META to page header:\n%s", meta)
+	}
+
+	next, cmd = moved.Update(keyMsg("4"))
+	metaFocused := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	if metaFocused.focusedPane != inspectorPane || metaFocused.selectedBlock != moved.selectedBlock {
+		t.Fatalf("4 changed focus/selection to pane=%v block=%d", metaFocused.focusedPane, metaFocused.selectedBlock)
+	}
+	next, _ = metaFocused.Update(tea.KeyMsg{Type: tea.KeyDown})
+	scrolled := next.(model)
+	if scrolled.selectedBlock != metaFocused.selectedBlock {
+		t.Fatalf("META scroll changed selected block from %d to %d", metaFocused.selectedBlock, scrolled.selectedBlock)
+	}
+	if scrolled.inspectorScroll != 1 {
+		t.Fatalf("META scroll = %d, want 1", scrolled.inspectorScroll)
+	}
+}
+
+func TestCellBlockMetaShowsParsedValues(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	var cellBlock pageBlock
+	found := false
+	for _, block := range buildPageBlocks(loaded.currentPage) {
+		if block.kind == pageBlockTableLeafCell || block.kind == pageBlockIndexLeafCell || block.kind == pageBlockIndexInteriorCell {
+			cellBlock = block
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("fixture page has no payload-carrying cell block")
+	}
+
+	meta := strings.Join(blockMetaLines(cellBlock, loaded.currentPage), "\n")
+	for _, want := range []string{"VALUES", "00:", "serial"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("cell block meta missing parsed value token %q:\n%s", want, meta)
+		}
+	}
+	if !strings.Contains(meta, "\"") && !strings.Contains(meta, "NULL") {
+		t.Fatalf("cell block meta does not show decoded scalar values:\n%s", meta)
+	}
+}
+
+func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.height = 8
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	blocks := hex.currentPageBlocks()
+	if len(blocks) < 5 {
+		t.Fatalf("loaded page has %d blocks, want enough blocks to test scrolling", len(blocks))
+	}
+
+	for idx := 0; idx < len(blocks)-1; idx++ {
+		next, _ = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+		hex = next.(model)
+	}
+	last := blocks[len(blocks)-1]
+	if hex.selectedBlock != len(blocks)-1 {
+		t.Fatalf("selected block %d, want last block %d", hex.selectedBlock, len(blocks)-1)
+	}
+	if last.meta.StartOffset >= 16 && hex.hexScroll == 0 {
+		t.Fatal("selecting a later block did not advance hexScroll")
+	}
+
+	view := hex.viewExplorer(80, 4)
+	rowOffset := (last.meta.StartOffset / 16) * 16
+	if !strings.Contains(view, fmt.Sprintf("%04X", rowOffset)) {
+		t.Fatalf("hex viewport did not reveal selected block starting at %d:\n%s", last.meta.StartOffset, view)
+	}
+
+	rowEnd := rowOffset + 16
+	if rowEnd > len(hex.currentPage.BTreePage.Raw) {
+		rowEnd = len(hex.currentPage.BTreePage.Raw)
+	}
+	rendered := formatHexRow(rowOffset, hex.currentPage.BTreePage.Raw[rowOffset:rowEnd], blocks, hex.selectedBlock)
+	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", hex.currentPage.BTreePage.Raw[last.meta.StartOffset]))
+	if !strings.Contains(rendered, wantByte) {
+		t.Fatalf("selected block byte did not use selected style:\n%s", rendered)
+	}
+}
+
+func TestPageMovementResetsHexSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	hex.focusedPane = navPane
+	hex.hexScroll = 4
+	next, cmd = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+	movingPage := next.(model)
+	if cmd == nil {
+		t.Fatal("moving to next page did not return a load command")
+	}
+	if movingPage.blockSelected {
+		t.Fatal("page movement left a selected hex block")
+	}
+	if movingPage.hexScroll != 0 {
+		t.Fatalf("page movement left hexScroll = %d, want 0", movingPage.hexScroll)
 	}
 }
 

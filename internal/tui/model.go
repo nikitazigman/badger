@@ -70,6 +70,9 @@ type model struct {
 	active          contentTarget
 	currentPage     *sqlite.PageInspection
 	focusedPane     pane
+	selectedBlock   int
+	blockSelected   bool
+	hexScroll       int
 	width           int
 	height          int
 	status          string
@@ -218,6 +221,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.currentPage = msg.page
+		m.validateBlockSelection()
+		if m.focusedPane == explorerPane {
+			m.selectFirstHexBlockIfNeeded()
+		}
 		m.inspectorScroll = 0
 		m.loading = false
 		m.loadingVisible = false
@@ -273,6 +280,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "3":
 		m.focusedPane = explorerPane
+		if m.active.kind == navPage {
+			m.selectFirstHexBlockIfNeeded()
+			m.revealSelectedHexBlock()
+		}
 		return m, nil
 	case "4":
 		m.focusedPane = inspectorPane
@@ -303,6 +314,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(-1) {
 				return m.activateSelected()
 			}
+		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
+			m.moveHexBlock(-1)
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(-1, 1)
 		}
@@ -312,6 +325,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(1) {
 				return m.activateSelected()
 			}
+		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
+			m.moveHexBlock(1)
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(1, 1)
 		}
@@ -339,6 +354,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.loadingVisible = false
 		m.inspectorScroll = 0
+		m.resetHexSelection()
 		m.status = "reset page selection"
 		return m, nil
 	}
@@ -400,6 +416,75 @@ func (m *model) scrollInspector(direction int, amount int) {
 	}
 }
 
+func (m *model) resetHexSelection() {
+	m.selectedBlock = 0
+	m.blockSelected = false
+	m.hexScroll = 0
+}
+
+func (m *model) selectFirstHexBlockIfNeeded() {
+	if m.blockSelected {
+		m.validateBlockSelection()
+		return
+	}
+	if len(m.currentPageBlocks()) == 0 {
+		return
+	}
+	m.selectedBlock = 0
+	m.blockSelected = true
+}
+
+func (m *model) validateBlockSelection() {
+	if !m.blockSelected {
+		return
+	}
+	blocks := m.currentPageBlocks()
+	if len(blocks) == 0 {
+		m.resetHexSelection()
+		return
+	}
+	if m.selectedBlock < 0 {
+		m.selectedBlock = 0
+	}
+	if m.selectedBlock >= len(blocks) {
+		m.selectedBlock = len(blocks) - 1
+	}
+}
+
+func (m *model) moveHexBlock(delta int) {
+	blocks := m.currentPageBlocks()
+	if len(blocks) == 0 {
+		m.resetHexSelection()
+		return
+	}
+	if !m.blockSelected {
+		m.selectedBlock = 0
+		m.blockSelected = true
+		m.inspectorScroll = 0
+		m.revealSelectedHexBlock()
+		return
+	}
+	next := clamp(m.selectedBlock+delta, 0, len(blocks)-1)
+	if next == m.selectedBlock {
+		return
+	}
+	m.selectedBlock = next
+	m.inspectorScroll = 0
+	m.revealSelectedHexBlock()
+}
+
+func (m *model) revealSelectedHexBlock() {
+	blocks := m.currentPageBlocks()
+	if !m.blockSelected || m.selectedBlock < 0 || m.selectedBlock >= len(blocks) {
+		return
+	}
+	m.hexScroll = revealHexBlockScroll(m.hexScroll, blocks[m.selectedBlock], m.hexDataRows())
+}
+
+func (m model) hexDataRows() int {
+	return max(1, m.height-4-1)
+}
+
 func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	item := m.selectedItem()
 	m.active = contentTarget{
@@ -408,6 +493,7 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	m.err = nil
 	m.loading = false
 	m.loadingVisible = false
+	m.resetHexSelection()
 
 	switch item.kind {
 	case navOverview:
@@ -789,6 +875,9 @@ func (m model) detailHeaderText() string {
 
 func (m model) metaHeaderText() string {
 	if m.active.kind == navPage {
+		if block, ok := m.selectedPageBlock(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+			return block.title()
+		}
 		return fmt.Sprintf("page %d", m.inspectorPageNumber())
 	}
 	return m.selectedItem().title
@@ -887,7 +976,7 @@ func (m model) viewPage(width int, height int) []string {
 		return wrapLines([]string{"Waiting for page bytes..."}, width)
 	}
 
-	return renderHexRows(m.currentPage.BTreePage.Raw, width, height)
+	return m.renderHexRows(width, height)
 }
 
 func (m model) viewInspector(width int, height int) string {
@@ -1002,6 +1091,10 @@ func (m model) viewPageMeta() string {
 	}
 
 	page := m.currentPage
+	if block, ok := m.selectedPageBlock(); ok && (m.focusedPane == explorerPane || m.focusedPane == inspectorPane) {
+		return strings.Join(blockMetaLines(block, page), "\n")
+	}
+
 	header := page.BTreePage.PageHeader
 	pointerBytes := len(page.BTreePage.CellPointerArray.Pointers) * 2
 	unallocatedBytes := 0
@@ -1044,6 +1137,22 @@ func (m model) inspectorPageNumber() uint32 {
 		pageNumber = m.currentPage.PageNumber
 	}
 	return pageNumber
+}
+
+func (m model) currentPageBlocks() []pageBlock {
+	pageNumber := m.inspectorPageNumber()
+	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+		return nil
+	}
+	return buildPageBlocks(m.currentPage)
+}
+
+func (m model) selectedPageBlock() (pageBlock, bool) {
+	blocks := m.currentPageBlocks()
+	if !m.blockSelected || m.selectedBlock < 0 || m.selectedBlock >= len(blocks) {
+		return pageBlock{}, false
+	}
+	return blocks[m.selectedBlock], true
 }
 
 func paneInnerWidth(outerWidth int) int {
@@ -1116,28 +1225,42 @@ func renderScrollbar(lines []string, contentWidth int, height int, scroll int, m
 	return strings.Join(out, "\n")
 }
 
-func renderHexRows(raw []byte, width int, height int) []string {
+func (m model) renderHexRows(width int, height int) []string {
 	if height <= 0 {
 		return nil
 	}
+	if m.currentPage == nil {
+		return []string{"No page bytes."}
+	}
+	raw := m.currentPage.BTreePage.Raw
 	if len(raw) == 0 {
 		return []string{"No page bytes."}
 	}
 
 	lines := []string{hexOffsetStyle.Render(truncateCells("Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F", width))}
-	for offset := 0; offset < len(raw) && len(lines) < height; offset += 16 {
+	blocks := buildPageBlocks(m.currentPage)
+	selected := -1
+	if m.blockSelected && m.selectedBlock >= 0 && m.selectedBlock < len(blocks) {
+		selected = m.selectedBlock
+	}
+	dataRows := max(0, height-1)
+	scroll := clamp(m.hexScroll, 0, max(0, (len(raw)+15)/16-dataRows))
+	if selected >= 0 {
+		scroll = revealHexBlockScroll(scroll, blocks[selected], dataRows)
+	}
+	for offset := scroll * 16; offset < len(raw) && len(lines) < height; offset += 16 {
 		end := offset + 16
 		if end > len(raw) {
 			end = len(raw)
 		}
-		lines = append(lines, styleHexOffset(truncateCells(formatHexRow(offset, raw[offset:end]), width)))
+		lines = append(lines, truncateCells(formatHexRow(offset, raw[offset:end], blocks, selected), width))
 	}
 	return lines
 }
 
-func formatHexRow(offset int, chunk []byte) string {
+func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%04X     ", offset)
+	b.WriteString(hexOffsetStyle.Render(fmt.Sprintf("%04X     ", offset)))
 	for idx := 0; idx < 16; idx++ {
 		if idx > 0 {
 			if idx == 8 {
@@ -1147,7 +1270,9 @@ func formatHexRow(offset int, chunk []byte) string {
 			}
 		}
 		if idx < len(chunk) {
-			fmt.Fprintf(&b, "%02X", chunk[idx])
+			byteOffset := offset + idx
+			token := fmt.Sprintf("%02X", chunk[idx])
+			b.WriteString(styleHexByte(token, byteOffset, blocks, selected))
 		} else {
 			b.WriteString("  ")
 		}
@@ -1155,11 +1280,17 @@ func formatHexRow(offset int, chunk []byte) string {
 	return b.String()
 }
 
-func styleHexOffset(row string) string {
-	if len(row) <= 9 {
-		return hexOffsetStyle.Render(row)
+func styleHexByte(token string, offset int, blocks []pageBlock, selected int) string {
+	for idx, block := range blocks {
+		if offset < block.meta.StartOffset || offset >= block.meta.EndOffset() {
+			continue
+		}
+		if idx == selected {
+			return selectedHexByteStyle.Render(token)
+		}
+		return blockStyle(block.kind).Render(token)
 	}
-	return hexOffsetStyle.Render(row[:9]) + row[9:]
+	return unknownHexByteStyle.Render(token)
 }
 
 func detailFrameTitle(title string) string {
@@ -1182,10 +1313,37 @@ var (
 	selectedNavItemStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
 	mutedStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	hexOffsetStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	unknownHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	dbHeaderHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	pageHeaderHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	pointerArrayHexByteStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	freeblockHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	unallocatedHexByteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	cellHexByteStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
+	selectedHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("25")).Bold(true)
 	errorStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	scrollbarTrackStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollbarThumbStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
+
+func blockStyle(kind pageBlockKind) lipgloss.Style {
+	switch kind {
+	case pageBlockDatabaseHeader:
+		return dbHeaderHexByteStyle
+	case pageBlockPageHeader:
+		return pageHeaderHexByteStyle
+	case pageBlockPointerArray:
+		return pointerArrayHexByteStyle
+	case pageBlockFreeblock:
+		return freeblockHexByteStyle
+	case pageBlockUnallocated:
+		return unallocatedHexByteStyle
+	case pageBlockTableLeafCell, pageBlockTableInteriorCell, pageBlockIndexLeafCell, pageBlockIndexInteriorCell:
+		return cellHexByteStyle
+	default:
+		return unknownHexByteStyle
+	}
+}
 
 // buildNavItems builds the flat nav list. Tables and indexes share one B-TREES section.
 // The PAGES section lists filteredPages when filter != nil (an empty list for a virtual
