@@ -731,6 +731,128 @@ func TestHexFocusAndMovementSelectTopLevelBlocks(t *testing.T) {
 	}
 }
 
+func TestMetaToHexPreservesBlockSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	next, _ = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+	hex = next.(model)
+	selectedBlock := hex.selectedBlock
+
+	next, cmd = hex.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	if meta.focusedPane != inspectorPane {
+		t.Fatalf("4 focused pane = %v, want inspectorPane", meta.focusedPane)
+	}
+
+	next, cmd = meta.Update(keyMsg("3"))
+	back := next.(model)
+	if cmd != nil {
+		t.Fatal("3 from META returned a command")
+	}
+	if back.focusedPane != explorerPane {
+		t.Fatalf("3 from META focused pane = %v, want explorerPane", back.focusedPane)
+	}
+	if !back.blockSelected || back.selectedBlock != selectedBlock {
+		t.Fatalf("3 from META selected block = (%v, %d), want (%v, %d)", back.blockSelected, back.selectedBlock, true, selectedBlock)
+	}
+}
+
+func TestMetaToHexPreservesDrillSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	parent := selectFirstDrillableBlock(t, &hex)
+	next, _ = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+	next, _ = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	drilled = next.(model)
+	stackDepth := len(drilled.drill.stack)
+	selectedChild := drilled.drill.stack[stackDepth-1].selectedChild
+
+	next, cmd = drilled.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	next, cmd = meta.Update(keyMsg("3"))
+	back := next.(model)
+	if cmd != nil {
+		t.Fatal("3 from META returned a command")
+	}
+	if back.focusedPane != explorerPane {
+		t.Fatalf("3 from META focused pane = %v, want explorerPane", back.focusedPane)
+	}
+	if !back.drill.active || back.drill.parentBlock != parent {
+		t.Fatalf("3 from META changed drill parent/state to %+v, want parent %d active", back.drill, parent)
+	}
+	if len(back.drill.stack) != stackDepth {
+		t.Fatalf("3 from META changed drill depth to %d, want %d", len(back.drill.stack), stackDepth)
+	}
+	if got := back.drill.stack[len(back.drill.stack)-1].selectedChild; got != selectedChild {
+		t.Fatalf("3 from META changed selected drill child to %d, want %d", got, selectedChild)
+	}
+	if back.selectedBlock != parent {
+		t.Fatalf("3 from META selected block %d, want parent %d", back.selectedBlock, parent)
+	}
+}
+
+func TestPagesToMetaShowsPageMetadataAfterHexDrillActivity(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	selectFirstDrillableBlock(t, &hex)
+	next, _ = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+
+	drilled.focusedPane = navPane
+	next, cmd = drilled.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 from PAGES returned a command")
+	}
+	if meta.focusedPane != inspectorPane {
+		t.Fatalf("4 from PAGES focused pane = %v, want inspectorPane", meta.focusedPane)
+	}
+	content := meta.viewInspector(52, 14)
+	for _, want := range []string{"Page 1", "STRUCTURE", "Cells:", "Pointer array:"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("page META missing %q after drill activity:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "Parent: Cell") || strings.Contains(content, "Payload Size") {
+		t.Fatalf("4 from PAGES showed drill metadata instead of page metadata:\n%s", content)
+	}
+}
+
 func TestCellBlockMetaShowsParsedValues(t *testing.T) {
 	t.Parallel()
 

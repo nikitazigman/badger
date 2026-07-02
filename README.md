@@ -78,12 +78,14 @@ Badger opens directly into an interactive TUI.
 The interface has three panes:
 
 - Navigation: `[1] B-TREES` and `[2] PAGES`.
-- Detail: `[3]`, the currently selected view, such as schema object details or page structures.
-- Meta: `[4]`, contextual details for the selected item, including byte ranges, raw bytes, byte maps, decoded fields, and actions.
+- Detail: `[3]`, the currently selected view. For loaded pages this is `[3] HEX`, a 16-byte-wide hex grid.
+- Meta: `[4]`, contextual parsed metadata for the selected navigation item, page, block, or drill range.
 
 The `B-TREES` section merges tables and indexes into one list. It starts with the SQLite-created `sqlite_schema` system catalog at root page 1. Tables use `▦`, indexes use `◈`, and root-page-zero objects use `⊞` because they do not have their own b-tree. The `PAGES` section shows every database page by default.
 
-In the page view, the Detail pane lists page structures such as the page header, pointer array, free space, and cells. Selecting a row shows the related raw bytes and parsed byte map in the Meta pane.
+In the page view, `[3] HEX` shows loaded page bytes as a 16-byte grid. Parsed page blocks are styled and selected by byte range: the database header on page 1, b-tree page header, pointer array, freeblocks, unallocated regions, and table/index cells. `[4] META` shows parsed page, block, or drill metadata; it does not include raw hex dumps or ASCII previews.
+
+When a selected byte range is drillable, `d` drills into it. Cell drill exposes payload size, rowid or left-child page where present, record payload, record header size, serial types, record values, and overflow pointer fields where available. `b` backs out one drill layer or exits drill mode. Footer hints are contextual, so `d drill`, `b back`, and filter hints appear only when they apply.
 
 ## Filtering Pages by B-Tree
 
@@ -107,9 +109,11 @@ Keybindings:
 | `up` / `down`, `k` / `j` | Move within the focused pane |
 | `1` | Focus `[1] B-TREES`, jump to the first b-tree row, and open it |
 | `2` | Focus `[2] PAGES`, jump to the first page row, and load it |
-| `3` | Focus `[3] Detail` |
+| `3` | Focus `[3] Detail` / `[3] HEX` |
 | `4` | Focus `[4] Meta` |
 | `enter` | Open the selected row when `[1] B-TREES` or `[2] PAGES` is focused |
+| `d` | Drill into the selected page block or drill child when available |
+| `b` | Back out of the current drill layer |
 | `f` | Filter pages to the selected table/index b-tree; clear it on the active source row |
 | `esc` | Clear the active filter; when unfiltered, reset page sub-selection/loading state |
 | `q` | Quit |
@@ -123,7 +127,7 @@ Use `1` through `4` to choose the active view. The `1` and `2` jumps move the na
 - Database pages by page number, either across the whole file or filtered to one table/index b-tree.
 - B-tree page membership for a table or index, derived by walking interior child pointers from its root page.
 - B-tree page headers, pointer arrays, freeblocks, unallocated regions, and cells.
-- Table and index cell payloads, including raw hex, ASCII preview, parsed fields, and byte maps.
+- Table and index cell payload metadata, including parsed fields and drillable record payload internals.
 
 ## Development
 

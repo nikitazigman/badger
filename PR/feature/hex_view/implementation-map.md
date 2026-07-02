@@ -25,8 +25,10 @@ Current relevant state:
 - `focusedPane`: `navPane`, `explorerPane`, `inspectorPane`.
 - `active`: active content target, including `navPage`.
 - `currentPage`: loaded `sqlite.PageInspection`.
-- `pageRows`: current page structure rows from `buildPageRows`.
-- `explorerIndex`: currently selected page structure row.
+- `selectedBlock`, `blockSelected`: selected top-level page block for `[3] HEX`.
+- `drill`: active drill stack for cell and record-payload internals.
+- `metaSource`: whether `[4] META` is showing page metadata from `[2] PAGES` or block/drill metadata from `[3] HEX`.
+- `hexScroll`: hex-grid row scroll offset.
 - `inspectorScroll`: scroll offset for `[4] META`.
 - `loading`, `loadingVisible`: delayed page loading display.
 
@@ -34,32 +36,29 @@ Current page behavior:
 
 - `2` focuses `navPane`, selects first `navPage`, and activates it.
 - Moving within `navPane` auto-activates selected pages.
-- `3` focuses `explorerPane`.
-- `4` focuses `inspectorPane`.
-- Up/down in `explorerPane` moves `explorerIndex` through `pageRows`.
+- `3` focuses `[3] HEX`, selects the first block when needed, and uses block/drill metadata as the META source.
+- `4` focuses `[4] META`; from `[2] PAGES` it shows page metadata, and from `[3] HEX` it preserves block/drill metadata.
+- Up/down in `[3] HEX` moves between top-level blocks, or between drill children while drilled.
 - Up/down in `inspectorPane` scrolls `inspectorScroll`.
-- `viewPage` renders a page summary plus a `STRUCTURES` table.
-- `viewPageInspector` renders raw bytes, ASCII, byte map, parsed fields, and decoded lines for the selected row.
+- `viewPage` renders the active page as a 16-byte HEX grid.
+- `viewPageMeta` renders parsed page, block, or drill-child metadata without raw hex or ASCII.
 
 Needed changes:
 
-- Reinterpret `explorerPane` as `[3] HEX` for `navPage`.
-- Keep `inspectorPane` as `[4] META`.
-- Add page-specific state for selected hex block, drill mode, and hex scroll.
-- Make page-level meta depend on focus/source, not on an independent inspector selection.
+- Keep implementation and tests aligned with the completed HEX/META flow.
+- Continue to treat `explorerPane` as `[3] HEX` and `inspectorPane` as `[4] META` for `navPage`.
+- Keep page-level metadata source explicit so `[4]` from PAGES does not show stale HEX drill metadata.
 
-### `internal/tui/page_view.go`
+### `internal/tui/page_blocks.go`
 
-Builds `pageRowViewModel` values from `sqlite.PageInspection`.
+Builds physically ordered `pageBlock` values from `sqlite.PageInspection`.
 
 Current useful fields:
 
-- `Type`: structure kind.
-- `Title`: display name.
-- `Meta`: page-local byte range.
-- `ParsedFields`: parsed key/value data.
-- `DecodedLines`: decoded payload text.
-- `SortStart`: physical ordering offset.
+- `kind`: page block kind.
+- `meta`: page-local byte range.
+- `cell`: optional parsed cell.
+- `freeblock`: optional parsed freeblock.
 
 Current output is already sorted by physical page offset and includes:
 
@@ -75,10 +74,24 @@ Current output is already sorted by physical page offset and includes:
 
 Needed changes:
 
-- Either rename `pageRowViewModel` to a block-oriented type or layer a new `pageHexBlock` type over it.
-- Remove raw byte and ASCII concepts from meta rendering.
-- Add child block builders for drill mode.
-- Add richer typed fields where current generic `ParsedFields` are not enough for the proposed meta renders.
+- Add new block kinds only when parser support exposes a new physical page range.
+- Keep block metadata parsed and concise; raw byte and ASCII output are intentionally excluded from META.
+
+### `internal/tui/page_drill.go`
+
+Builds drill child ranges for implemented cell internals.
+
+Current drill targets:
+
+- table/index cell payload size fields
+- table rowid fields
+- interior left-child page fields
+- record payload ranges
+- nested record header size, serial type, and value ranges
+- overflow pointer fields where present
+
+Pointer-array entry drill is deferred. The first complete Hex View release drills cells
+and record payload internals only.
 
 ### `internal/sqlite`
 
@@ -100,21 +113,19 @@ The TUI should not need parser changes for the initial implementation unless tes
 
 ## Target State Model
 
-Add page-specific UI state to `model`.
+The implementation keeps page-specific UI state directly on `model`.
 
-Suggested fields:
+Current fields:
 
 ```go
-hexBlocks        []pageHexBlock
-hexBlockIndex    int
-hexDrillParent   int
-hexDrillBlocks   []pageHexBlock
-hexDrilled       bool
-hexScrollLine    int
-metaSource       pageMetaSource
+selectedBlock int
+blockSelected bool
+drill         drillState
+metaSource    pageMetaSource
+hexScroll     int
 ```
 
-Alternative: keep `pageRows` as top-level blocks and add only child/drill state. If using this path, rename in a later cleanup only after behavior is stable.
+Top-level blocks are rebuilt from `currentPage` via `buildPageBlocks`; drill children are held in the active `drillState` stack.
 
 Suggested supporting types:
 
@@ -171,7 +182,8 @@ Required behavior:
 - Selection is block-based, not row-based.
 - Moving block selection resets meta scroll to top.
 - Moving block selection updates `[4] META`.
-- `d` drills into selected block if child ranges exist, or returns to parent granularity if already drilled.
+- `d` drills into the selected block or drill child if child ranges exist.
+- `b` backs out one drill layer, or exits drill mode from the top drill layer.
 - `4` focuses `[4] META` without changing hex selection.
 - If selected block is outside the visible hex viewport, scroll to reveal it.
 
@@ -314,9 +326,8 @@ Fields:
 - points to cell offsets
 - pointer list, truncated naturally by meta scroll
 
-Optional first-pass drill:
-
-- Pointer entry sub-blocks are useful but can be a separate task if cell drill is implemented first.
+Pointer-array entry drill is deferred. The first complete Hex View release drills cells
+and record payload internals only.
 
 ### Freeblock Block Meta
 
@@ -376,7 +387,7 @@ Each child meta should include:
 
 ### First-Pass Drill Targets
 
-Implement drill for cells first:
+Implemented drill targets:
 
 - table leaf cell:
   - payload size
@@ -405,12 +416,15 @@ Implement drill for cells first:
   - record values
   - overflow pointer if present
 
-Defer pointer-array drill if time is tight; it is explicitly an open design question.
+Pointer-array entry drill is deferred. The first complete Hex View release drills cells
+and record payload internals only.
 
 ### Toggle Behavior
 
 - Top level plus selected block with children plus `d`: enter drill mode.
-- Drilled plus `d`: return to top level and reselect the parent block.
+- Drilled plus selected child with children plus `d`: enter the child drill layer.
+- Drilled plus selected child without children plus `d`: no-op.
+- Drilled plus `b`: back out one drill layer, or exit drill mode at the top layer and reselect the parent block.
 - Top level plus selected block without children plus `d`: no-op.
 - Page change: exit drill mode.
 
@@ -445,7 +459,7 @@ Required behavioral tests:
 - Up/down in META scrolls only meta content.
 - Page movement in PAGES resets hex selection and drill state.
 - `d` enters drill for a cell with children.
-- `d` again exits drill and reselects the parent block.
+- `b` exits drill and reselects the parent block.
 - `d` on a block without children is a no-op.
 
 Required rendering tests:
@@ -540,8 +554,8 @@ Manual review:
 
 Task:
 
-- Add one-level drill state for selected blocks with children.
-- Implement cell child ranges first: payload size, rowid/left child, record payload, record header size, serial types, values, overflow pointer where present.
+- Add drill state for selected blocks with children.
+- Implement cell child ranges: payload size, rowid/left child, record payload, record header size, serial types, values, overflow pointer where present.
 - Keep the full-page hex grid visible while drilling.
 - Use child-range styling and selection inside the drilled parent.
 - Add child-specific meta views for every implemented drill child type.
@@ -550,7 +564,8 @@ Definition of done:
 
 - Pressing `d` on a drillable cell enters child selection mode.
 - Up/down moves between child ranges inside that cell.
-- Pressing `d` again returns to top-level selection and reselects the parent cell.
+- Pressing `d` on a drillable child enters the next drill layer.
+- Pressing `b` backs out one layer or returns to top-level selection and reselects the parent cell.
 - Pressing `d` on a non-drillable block is a no-op.
 - `[4] META` explains the selected child range while drilled.
 - Drill meta includes title, parent title, offset/range, size, parsed value, and meaning where available.
@@ -561,7 +576,7 @@ Manual review:
 - Select a cell in HEX.
 - Press `d` and confirm the same page remains visible but the selection granularity changes to parts of the cell.
 - Move through payload size, rowid/left child, record header, serial type, and value ranges and confirm META changes for each.
-- Press `d` again and confirm the parent cell is selected again.
+- Press `b` and confirm the parent cell is selected again.
 
 ### 4. Navigation And Focus Polish
 
@@ -593,7 +608,7 @@ Task:
 
 - Refine color/style choices for block ownership and selected bytes.
 - Fill in any missing meta fields that are already available from `internal/sqlite`.
-- Decide whether pointer-array drill should be added now or remain deferred.
+- Keep pointer-array drill deferred unless a later ticket pulls it forward.
 - Tighten behavior around narrow panes and long meta values.
 
 Definition of done:
@@ -634,7 +649,7 @@ Manual review:
 ## Deferred
 
 - `i` info/legend view.
-- Pointer-array entry drill, unless it falls out cheaply after the cell drill model exists.
-- Deeper drill levels beyond one parent/child toggle.
+- Pointer-array entry drill. The first complete Hex View release drills cells and record payload internals only.
+- Additional drill depths beyond the currently implemented cell and record-payload layers.
 - Inferring page ownership across all b-trees when no filter is active.
 - Parser changes for fields not already exposed by `internal/sqlite`.
