@@ -66,11 +66,9 @@ type model struct {
 	db              databaseViewModel
 	navItems        []navItem
 	selectedIndex   int
-	explorerIndex   int
 	inspectorScroll int
 	active          contentTarget
 	currentPage     *sqlite.PageInspection
-	pageRows        []pageRowViewModel
 	focusedPane     pane
 	width           int
 	height          int
@@ -220,8 +218,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.currentPage = msg.page
-		m.pageRows = buildPageRows(msg.page)
-		m.explorerIndex = 0
 		m.inspectorScroll = 0
 		m.loading = false
 		m.loadingVisible = false
@@ -307,8 +303,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(-1) {
 				return m.activateSelected()
 			}
-		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
-			m.moveExplorerSelection(-1)
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(-1, 1)
 		}
@@ -318,8 +312,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(1) {
 				return m.activateSelected()
 			}
-		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
-			m.moveExplorerSelection(1)
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(1, 1)
 		}
@@ -344,13 +336,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearFilter()
 			return m, nil
 		}
-		if m.active.kind == navPage && m.focusedPane == explorerPane && m.explorerIndex > 0 {
-			m.explorerIndex = 0
-			m.inspectorScroll = 0
-			m.status = "returned to page summary"
-			return m, nil
-		}
-		m.explorerIndex = 0
 		m.loading = false
 		m.loadingVisible = false
 		m.inspectorScroll = 0
@@ -405,21 +390,6 @@ func (m *model) selectFirstBTreeRow() bool {
 	return false
 }
 
-func (m *model) moveExplorerSelection(delta int) {
-	if len(m.pageRows) == 0 {
-		return
-	}
-	next := m.explorerIndex + delta
-	if next < 0 {
-		next = 0
-	}
-	if next >= len(m.pageRows) {
-		next = len(m.pageRows) - 1
-	}
-	m.explorerIndex = next
-	m.inspectorScroll = 0
-}
-
 func (m *model) scrollInspector(direction int, amount int) {
 	if amount < 1 {
 		amount = 1
@@ -443,13 +413,11 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	case navOverview:
 		m.status = "overview"
 		m.currentPage = nil
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		return m, nil
 	case navDBHeader:
 		m.status = "database header"
 		m.currentPage = nil
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		return m, nil
 	case navTable, navIndex:
@@ -458,12 +426,10 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("opened %s %s", item.schema.Type, item.schema.Name)
 		}
 		m.currentPage = nil
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		return m, nil
 	case navPage:
 		m.active.pageNumber = item.pageNumber
-		m.explorerIndex = 0
 		m.inspectorScroll = 0
 		m.loading = true
 		m.loadingVisible = false
@@ -584,16 +550,6 @@ func (m model) selectedItem() navItem {
 		return m.navItems[0]
 	}
 	return m.navItems[m.selectedIndex]
-}
-
-func (m model) selectedPageRow() *pageRowViewModel {
-	if len(m.pageRows) == 0 {
-		return nil
-	}
-	if m.explorerIndex < 0 || m.explorerIndex >= len(m.pageRows) {
-		return &m.pageRows[0]
-	}
-	return &m.pageRows[m.explorerIndex]
 }
 
 func (m model) viewNavigationColumn(width int, height int) string {
@@ -805,7 +761,7 @@ func (m model) viewExplorer(width int, height int) string {
 	case navTable, navIndex:
 		lines = m.viewSchemaObject(width)
 	case navPage:
-		lines = m.viewPage(width)
+		lines = m.viewPage(width, height)
 	default:
 		lines = []string{"No content"}
 	}
@@ -825,10 +781,7 @@ func (m model) detailHeaderText() string {
 		}
 		return "Schema Object"
 	case navPage:
-		if m.isFiltered() {
-			return objectIcon(m.activeFilter.object) + " Page"
-		}
-		return "Page"
+		return "HEX"
 	default:
 		return "No content"
 	}
@@ -917,71 +870,30 @@ func (m model) viewSchemaObject(width int) []string {
 	return wrapLines(lines, width)
 }
 
-func (m model) viewPage(width int) []string {
-	item := m.selectedItem()
-	pageNumber := item.pageNumber
+func (m model) viewPage(width int, height int) []string {
+	pageNumber := m.inspectorPageNumber()
 	preservingLoadedPage := m.loading && !m.loadingVisible && m.currentPage != nil
-	if preservingLoadedPage {
-		pageNumber = m.currentPage.PageNumber
-	}
-	lines := []string{
-		fmt.Sprintf("Page number: %d", pageNumber),
-	}
-	if pageNumber == 1 {
-		lines = append(lines, "Bytes 0-99 are the database header before the b-tree page content.")
-	}
 
 	if m.loading {
-		if !m.loadingVisible && !preservingLoadedPage {
-			return wrapLines(lines, width)
-		}
 		if m.loadingVisible {
-			lines = append(lines, "", "Loading page details...")
-			return wrapLines(lines, width)
+			return wrapLines([]string{"Loading page bytes..."}, width)
+		}
+		if !preservingLoadedPage {
+			return wrapLines([]string{"Waiting for page bytes..."}, width)
 		}
 	}
 
 	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
-		lines = append(lines, "", "Waiting for page details...")
-		return wrapLines(lines, width)
+		return wrapLines([]string{"Waiting for page bytes..."}, width)
 	}
 
-	page := m.currentPage
-	lines = append(lines,
-		fmt.Sprintf("Page %d | %s | size %d | cells %d | cell area %d | freeblock %d | frag %d",
-			page.PageNumber,
-			pageKindLabel(page.BTreePage.PageHeader.PageKind.Value),
-			len(page.BTreePage.Raw),
-			page.BTreePage.PageHeader.CellCount.Value,
-			page.BTreePage.PageHeader.CellContentAreaOffset.Value,
-			page.BTreePage.PageHeader.FirstFreeblock.Value,
-			page.BTreePage.PageHeader.FragmentedFreeBytes.Value,
-		),
-		"",
-		sectionStyle.Render("STRUCTURES"),
-		fmt.Sprintf("%-18s %-14s %-7s %s", "Kind", "Range", "Size", "Notes"),
-	)
-
-	for _, row := range m.visiblePageRows(width, 12) {
-		lineStyle := navItemStyle
-		prefix := "  "
-		if row.index == m.explorerIndex {
-			lineStyle = selectedNavItemStyle
-			prefix = "> "
-		}
-		text := fmt.Sprintf("%-18s %-14s %-7s %s", row.Title, row.RangeLabel, row.SizeLabel, row.Notes)
-		lines = append(lines, lineStyle.Width(width).Render(prefix+truncateLine(text, width-2)))
-	}
-
-	lines = append(lines, "", mutedStyle.Render("Focus explorer to move through page structures."))
-
-	return wrapLines(lines, width)
+	return renderHexRows(m.currentPage.BTreePage.Raw, width, height)
 }
 
 func (m model) viewInspector(width int, height int) string {
 	item := m.selectedItem()
 	if m.active.kind == navPage {
-		if content := m.viewPageInspector(width); content != "" {
+		if content := m.viewPageMeta(); content != "" {
 			return m.renderInspectorViewport(strings.Split(content, "\n"), width, height)
 		}
 	}
@@ -1076,54 +988,51 @@ func (m model) viewInspector(width int, height int) string {
 	return m.renderInspectorViewport(lines, width, height)
 }
 
-func (m model) viewPageInspector(width int) string {
+func (m model) viewPageMeta() string {
 	pageNumber := m.inspectorPageNumber()
 	lines := []string{}
 
 	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
 		if m.loadingVisible {
-			lines = append(lines, "", "Page details are loading.")
+			lines = append(lines, "Page metadata is loading.")
+		} else {
+			lines = append(lines, "Waiting for page metadata.")
 		}
 		return strings.Join(lines, "\n")
 	}
 
-	row := m.selectedPageRow()
-	if row == nil {
-		lines = append(lines, "", "No page structure selected.")
-		return strings.Join(lines, "\n")
-	}
-
-	pageSize := m.pageSizeForCurrentPage()
-	fileStart := row.Meta.FileStartOffset(pageNumber, pageSize)
-	fileEndExclusive := row.Meta.FileEndOffset(pageNumber, pageSize)
-	fileEnd := fileEndExclusive
-	if row.Meta.Size > 0 {
-		fileEnd = fileEndExclusive - 1
+	page := m.currentPage
+	header := page.BTreePage.PageHeader
+	pointerBytes := len(page.BTreePage.CellPointerArray.Pointers) * 2
+	unallocatedBytes := 0
+	for _, region := range page.BTreePage.UnallocatedRegions {
+		unallocatedBytes += region.Meta.Size
 	}
 
 	lines = append(lines,
-		fmt.Sprintf("Type: %s", row.Title),
-		fmt.Sprintf("Page range: %s", row.RangeLabel),
-		fmt.Sprintf("File range: %d..%d", fileStart, fileEnd),
-		fmt.Sprintf("Byte size: %d", row.Meta.Size),
+		fmt.Sprintf("Page %d", page.PageNumber),
+		fmt.Sprintf("Type: %s", pageKindLabel(header.PageKind.Value)),
+		fmt.Sprintf("Page size: %d bytes", len(page.BTreePage.Raw)),
+		fmt.Sprintf("File offset: %d", (page.PageNumber-1)*m.db.PageSize),
 		"",
-		sectionStyle.Render("RAW BYTES"),
-		row.RawHex,
+		sectionStyle.Render("STRUCTURE"),
+		fmt.Sprintf("Cells: %d", header.CellCount.Value),
+		fmt.Sprintf("Cell content start: %d", header.CellContentAreaOffset.Value),
+		fmt.Sprintf("First freeblock: %d", header.FirstFreeblock.Value),
+		fmt.Sprintf("Fragmented free bytes: %d", header.FragmentedFreeBytes.Value),
+		fmt.Sprintf("Pointer array: %d bytes", pointerBytes),
+		fmt.Sprintf("Freeblocks: %d", len(page.BTreePage.Freeblocks)),
+		fmt.Sprintf("Unallocated: %d bytes", unallocatedBytes),
 	)
-	if row.RawASCII != "" {
-		lines = append(lines, "ASCII: "+row.RawASCII)
+
+	if m.activeFilter != nil {
+		lines = append(lines,
+			"",
+			sectionStyle.Render("BTREE"),
+			fmt.Sprintf("Object: %s", m.activeFilter.object.Name),
+			fmt.Sprintf("Root page: %d", m.activeFilter.object.RootPage),
+		)
 	}
-
-	lines = append(lines, "", sectionStyle.Render("BYTE MAP"))
-	lines = append(lines, row.ByteMap...)
-
-	lines = append(lines, "", sectionStyle.Render("PARSED FIELDS"))
-	for _, field := range row.ParsedFields {
-		lines = append(lines, fmt.Sprintf("%s: %s", field.Label, field.Value))
-	}
-
-	lines = append(lines, "", sectionStyle.Render("DECODED"))
-	lines = append(lines, row.DecodedLines...)
 
 	return strings.Join(lines, "\n")
 }
@@ -1207,51 +1116,56 @@ func renderScrollbar(lines []string, contentWidth int, height int, scroll int, m
 	return strings.Join(out, "\n")
 }
 
-type visiblePageRow struct {
-	index int
-	pageRowViewModel
-}
-
-func (m model) visiblePageRows(width int, limit int) []visiblePageRow {
-	if len(m.pageRows) == 0 {
+func renderHexRows(raw []byte, width int, height int) []string {
+	if height <= 0 {
 		return nil
 	}
-
-	if limit <= 0 || limit > len(m.pageRows) {
-		limit = len(m.pageRows)
-	}
-	start := m.explorerIndex - limit/2
-	if start < 0 {
-		start = 0
-	}
-	end := start + limit
-	if end > len(m.pageRows) {
-		end = len(m.pageRows)
-		start = max(0, end-limit)
+	if len(raw) == 0 {
+		return []string{"No page bytes."}
 	}
 
-	rows := make([]visiblePageRow, 0, end-start)
-	for idx := start; idx < end; idx++ {
-		rows = append(rows, visiblePageRow{
-			index:            idx,
-			pageRowViewModel: m.pageRows[idx],
-		})
+	lines := []string{hexOffsetStyle.Render(truncateCells("Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F", width))}
+	for offset := 0; offset < len(raw) && len(lines) < height; offset += 16 {
+		end := offset + 16
+		if end > len(raw) {
+			end = len(raw)
+		}
+		lines = append(lines, styleHexOffset(truncateCells(formatHexRow(offset, raw[offset:end]), width)))
 	}
-	_ = width
-	return rows
+	return lines
 }
 
-func (m model) pageSizeForCurrentPage() uint32 {
-	if m.currentPage != nil && m.currentPage.DBHeader != nil && m.currentPage.DBHeader.PageSize > 0 {
-		return m.currentPage.DBHeader.PageSize
+func formatHexRow(offset int, chunk []byte) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%04X     ", offset)
+	for idx := 0; idx < 16; idx++ {
+		if idx > 0 {
+			if idx == 8 {
+				b.WriteString("  ")
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+		if idx < len(chunk) {
+			fmt.Fprintf(&b, "%02X", chunk[idx])
+		} else {
+			b.WriteString("  ")
+		}
 	}
-	if m.db.PageSize > 0 {
-		return m.db.PageSize
+	return b.String()
+}
+
+func styleHexOffset(row string) string {
+	if len(row) <= 9 {
+		return hexOffsetStyle.Render(row)
 	}
-	return 1
+	return hexOffsetStyle.Render(row[:9]) + row[9:]
 }
 
 func detailFrameTitle(title string) string {
+	if title == "HEX" {
+		return "[3] HEX"
+	}
 	return "[3] DETAIL  " + title
 }
 
@@ -1267,6 +1181,7 @@ var (
 	navItemStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	selectedNavItemStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
 	mutedStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	hexOffsetStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	errorStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	scrollbarTrackStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollbarThumbStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
