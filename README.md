@@ -1,4 +1,8 @@
-# Badger
+
+<h1>
+  <img src="docs/screenshots/badger_logo.png" alt="Badger logo" width="240" align="center">
+  Badger
+</h1>
 
 Badger is a terminal UI for exploring SQLite database files at the byte and page level.
 
