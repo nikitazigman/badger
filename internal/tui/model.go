@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/nikitazigman/badger/internal/sqlite"
 )
 
@@ -710,6 +711,9 @@ func (m model) View() string {
 	navWidth := clamp(availableWidth/4, 24, 34)
 	inspectorWidth := clamp(availableWidth/4, 28, 38)
 	explorerWidth := availableWidth - navWidth - inspectorWidth
+	if m.active.kind == navPage {
+		navWidth, explorerWidth, inspectorWidth = pagePaneWidths(availableWidth, navWidth, explorerWidth, inspectorWidth)
+	}
 	paneContentHeight := max(0, bodyHeight-2)
 
 	nav := m.viewNavigationColumn(navWidth, bodyHeight)
@@ -742,6 +746,35 @@ func (m model) View() string {
 	}
 	lines = append(lines, insetLine(status, rootMarginX, availableWidth))
 	return strings.Join(lines, "\n")
+}
+
+func pagePaneWidths(availableWidth int, navWidth int, explorerWidth int, inspectorWidth int) (int, int, int) {
+	const (
+		minPageNavWidth       = 22
+		minPageInspectorWidth = 24
+		minFullHexFrameWidth  = 61
+	)
+
+	deficit := minFullHexFrameWidth - explorerWidth
+	if deficit <= 0 {
+		return navWidth, explorerWidth, inspectorWidth
+	}
+
+	shrinkInspector := min(deficit, max(0, inspectorWidth-minPageInspectorWidth))
+	inspectorWidth -= shrinkInspector
+	explorerWidth += shrinkInspector
+	deficit -= shrinkInspector
+
+	shrinkNav := min(deficit, max(0, navWidth-minPageNavWidth))
+	navWidth -= shrinkNav
+	explorerWidth += shrinkNav
+
+	if explorerWidth > availableWidth {
+		explorerWidth = availableWidth
+		navWidth = 0
+		inspectorWidth = 0
+	}
+	return navWidth, explorerWidth, inspectorWidth
 }
 
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
@@ -1879,6 +1912,13 @@ func max(a int, b int) int {
 	return b
 }
 
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func truncateLine(text string, width int) string {
 	if width <= 0 {
 		return ""
@@ -1901,27 +1941,7 @@ func truncateCells(text string, width int) string {
 		return text
 	}
 	if width <= 1 {
-		for _, r := range text {
-			cellWidth := lipgloss.Width(string(r))
-			if cellWidth <= width {
-				return string(r)
-			}
-			return ""
-		}
-		return ""
+		return xansi.Truncate(text, width, "")
 	}
-
-	var b strings.Builder
-	used := 0
-	ellipsisWidth := lipgloss.Width("…")
-	for _, r := range text {
-		cellWidth := lipgloss.Width(string(r))
-		if used+cellWidth+ellipsisWidth > width {
-			break
-		}
-		b.WriteRune(r)
-		used += cellWidth
-	}
-	b.WriteString("…")
-	return b.String()
+	return xansi.Truncate(text, width, "…")
 }

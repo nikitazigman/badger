@@ -619,6 +619,30 @@ func TestPageHexPaneAndMeta(t *testing.T) {
 	}
 }
 
+func TestPageViewKeepsFullHexRowsAtDefaultWidth(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.width = 120
+	m.height = 34
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	view := loaded.View()
+	for _, want := range []string{
+		"Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F",
+		"53 51 4C 69 74 65 20 66  6F 72 6D 61 74 20 33 00",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("120-column page view clipped full hex row %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestFilteredPageMetaShowsBTreeSource(t *testing.T) {
 	t.Parallel()
 
@@ -1422,6 +1446,46 @@ func TestContentPaneTitlesShowJumpNumbers(t *testing.T) {
 			t.Fatalf("80x24 view missing %q:\n%s", label, fullView)
 		}
 	}
+}
+
+func TestTruncateCellsPreservesANSISequences(t *testing.T) {
+	t.Parallel()
+
+	row := formatHexRowWithSelection(
+		0,
+		[]byte{0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00},
+		[]pageBlock{{kind: pageBlockDatabaseHeader, meta: sqlite.Meta{StartOffset: 0, Size: 100}}},
+		sqlite.Meta{StartOffset: 0, Size: 1},
+		true,
+		nil,
+	)
+
+	for width := 1; width < lipgloss.Width(row); width++ {
+		got := truncateCells(row, width)
+		if hasIncompleteCSI(got) {
+			t.Fatalf("truncateCells left incomplete CSI at width %d: %q", width, got)
+		}
+		if gotWidth := lipgloss.Width(got); gotWidth > width {
+			t.Fatalf("truncateCells width %d produced %d cells: %q", width, gotWidth, got)
+		}
+	}
+}
+
+func hasIncompleteCSI(s string) bool {
+	inCSI := false
+	for idx := 0; idx < len(s); idx++ {
+		if !inCSI {
+			if s[idx] == '\x1b' && idx+1 < len(s) && s[idx+1] == '[' {
+				inCSI = true
+				idx++
+			}
+			continue
+		}
+		if s[idx] >= 0x40 && s[idx] <= 0x7e {
+			inCSI = false
+		}
+	}
+	return inCSI
 }
 
 func TestStartsOnVisibleBTreeRow(t *testing.T) {
