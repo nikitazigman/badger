@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -102,8 +103,8 @@ func TestSectionJumpsAutoActivate(t *testing.T) {
 	if loaded.currentPage == nil || loaded.currentPage.PageNumber != got.active.pageNumber {
 		t.Fatalf("loaded current page = %+v, want page %d", loaded.currentPage, got.active.pageNumber)
 	}
-	if len(loaded.pageRows) == 0 {
-		t.Fatal("loaded page did not build page rows")
+	if len(loaded.currentPage.BTreePage.Raw) == 0 {
+		t.Fatal("loaded page has no raw bytes")
 	}
 
 	next, _ = loaded.Update(loadingDelayElapsedMsg{pageNumber: got.active.pageNumber})
@@ -280,9 +281,6 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	if len(loaded.pageRows) < 2 {
-		t.Fatalf("setup: loaded %d page rows, want at least 2", len(loaded.pageRows))
-	}
 
 	next, cmd = loaded.Update(keyMsg("3"))
 	detail := next.(model)
@@ -298,8 +296,8 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 	if detailMoved.focusedPane != explorerPane {
 		t.Fatalf("detail focus = %v, want explorerPane", detailMoved.focusedPane)
 	}
-	if detailMoved.explorerIndex != 1 {
-		t.Fatalf("detail down set explorerIndex = %d, want 1", detailMoved.explorerIndex)
+	if detailMoved.inspectorScroll != detail.inspectorScroll {
+		t.Fatalf("detail down changed inspectorScroll from %d to %d", detail.inspectorScroll, detailMoved.inspectorScroll)
 	}
 	if detailMoved.selectedIndex != selectedIndex {
 		t.Fatalf("detail down moved nav selection from %d to %d", selectedIndex, detailMoved.selectedIndex)
@@ -321,9 +319,6 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 	if metaScrolled.inspectorScroll != 1 {
 		t.Fatalf("meta down set inspectorScroll = %d, want 1", metaScrolled.inspectorScroll)
 	}
-	if metaScrolled.explorerIndex != detailMoved.explorerIndex {
-		t.Fatalf("meta down changed explorerIndex from %d to %d", detailMoved.explorerIndex, metaScrolled.explorerIndex)
-	}
 	if metaScrolled.selectedIndex != selectedIndex {
 		t.Fatalf("meta down moved nav selection from %d to %d", selectedIndex, metaScrolled.selectedIndex)
 	}
@@ -339,12 +334,8 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	if len(loaded.pageRows) < 3 {
-		t.Fatalf("setup: loaded %d page rows, want at least 3", len(loaded.pageRows))
-	}
 
 	loaded.focusedPane = explorerPane
-	loaded.explorerIndex = 2
 	loaded.inspectorScroll = 3
 	active := loaded.active
 	selectedIndex := loaded.selectedIndex
@@ -352,9 +343,6 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	got := next.(model)
 	if cmd != nil {
 		t.Fatalf("enter in detail returned cmd %v, want nil", cmd)
-	}
-	if got.explorerIndex != 2 {
-		t.Fatalf("enter in detail reset explorerIndex to %d, want 2", got.explorerIndex)
 	}
 	if got.inspectorScroll != 3 {
 		t.Fatalf("enter in detail changed inspectorScroll to %d, want 3", got.inspectorScroll)
@@ -369,9 +357,6 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("enter in meta returned cmd %v, want nil", cmd)
 	}
-	if got.explorerIndex != 2 {
-		t.Fatalf("enter in meta reset explorerIndex to %d, want 2", got.explorerIndex)
-	}
 
 	got.focusedPane = navPane
 	next, cmd = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -379,8 +364,8 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter in navigation did not activate selected page")
 	}
-	if got.explorerIndex != 0 {
-		t.Fatalf("enter in navigation left explorerIndex = %d, want reset to 0", got.explorerIndex)
+	if got.inspectorScroll != 0 {
+		t.Fatalf("enter in navigation left inspectorScroll = %d, want reset to 0", got.inspectorScroll)
 	}
 }
 
@@ -411,15 +396,18 @@ func TestEscUnfilteredDoesNotNavigateToRemovedOverview(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	// Inside an open page with explorerIndex > 0 → return to page summary.
+	// Inside an open page, Esc resets transient page state without hidden navigation.
 	m.active = contentTarget{kind: navPage}
 	m.focusedPane = explorerPane
-	m.pageRows = []pageRowViewModel{{}, {}}
-	m.explorerIndex = 1
+	m.loading = true
+	m.inspectorScroll = 3
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	got := next.(model)
-	if got.explorerIndex != 0 {
-		t.Fatalf("esc inside an open page left explorerIndex = %d, want 0", got.explorerIndex)
+	if got.loading {
+		t.Fatal("esc inside an open page left loading=true")
+	}
+	if got.inspectorScroll != 0 {
+		t.Fatalf("esc inside an open page left inspectorScroll = %d, want 0", got.inspectorScroll)
 	}
 	if got.active.kind != navPage {
 		t.Fatalf("esc inside an open page changed active to %v, want it to stay navPage", got.active.kind)
@@ -564,14 +552,790 @@ func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
 	}
 
 	view := scrolling.View()
-	if !strings.Contains(view, "Page number: 1") {
-		t.Fatalf("view did not keep previous page visible during delay; want page %d", firstPage)
+	if !strings.Contains(view, "[3] HEX") {
+		t.Fatalf("view did not render the page pane as HEX during delay:\n%s", view)
 	}
-	if !strings.Contains(view, "STRUCTURES") {
-		t.Fatal("view did not keep the previous page structure table visible during delay")
+	if !strings.Contains(view, "Offset   00 01 02 03 04 05 06 07") ||
+		!strings.Contains(view, "0000") ||
+		!strings.Contains(view, "53 51 4C 69 74 65 20 66  6F 72 6D 61 74 20 33") {
+		t.Fatalf("view did not keep previous page hex bytes visible during delay; want page %d:\n%s", firstPage, view)
+	}
+	if strings.Contains(view, "STRUCTURES") {
+		t.Fatal("view still shows the previous page structure table during delay")
 	}
 	if strings.Contains(view, "Waiting for page details") || strings.Contains(view, "Loading page") {
 		t.Fatal("view showed loading/empty placeholder during the delay")
+	}
+}
+
+func TestPageHexPaneAndMeta(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	view := loaded.View()
+	pagePane := loaded.viewExplorer(80, 8)
+	meta := loaded.viewInspector(60, 20)
+	for _, want := range []string{
+		"[3] HEX",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("page view missing %q:\n%s", want, view)
+		}
+	}
+	for _, want := range []string{
+		"Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F",
+		"0000",
+		"53 51 4C 69 74 65 20 66  6F 72 6D 61 74 20 33 00",
+	} {
+		if !strings.Contains(pagePane, want) {
+			t.Fatalf("page hex pane missing %q:\n%s", want, pagePane)
+		}
+	}
+	for _, want := range []string{
+		"[4] META",
+		"Page 1",
+		"Type: leaf table",
+		"Page size: 4096 bytes",
+		"File offset: 0",
+		"STRUCTURE",
+		"Cells:",
+		"Pointer array:",
+	} {
+		if !strings.Contains(view+"\n"+meta, want) {
+			t.Fatalf("page meta missing %q:\n%s", want, meta)
+		}
+	}
+	for _, dropped := range []string{"STRUCTURES", "RAW BYTES", "ASCII:"} {
+		if strings.Contains(view, dropped) {
+			t.Fatalf("page view still contains removed page detail %q:\n%s", dropped, view)
+		}
+	}
+}
+
+func TestPageViewKeepsFullHexRowsAtDefaultWidth(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.width = 120
+	m.height = 34
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	view := loaded.View()
+	for _, want := range []string{
+		"Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F",
+		"53 51 4C 69 74 65 20 66  6F 72 6D 61 74 20 33 00",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("120-column page view clipped full hex row %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestFilteredPageMetaShowsBTreeSource(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	meta := loaded.viewInspector(36, 20)
+	for _, want := range []string{"BTREE", "Object: companies", "Root page: 2"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("filtered page meta missing %q:\n%s", want, meta)
+		}
+	}
+	if strings.Contains(meta, "ASCII:") || strings.Contains(meta, "RAW BYTES") {
+		t.Fatalf("filtered page meta contains raw byte detail:\n%s", meta)
+	}
+}
+
+func TestPageBlocksArePhysicalOrder(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	blocks := buildPageBlocks(loaded.currentPage)
+	if len(blocks) < 4 {
+		t.Fatalf("loaded page has %d blocks, want at least database header, page header, pointer array, and data", len(blocks))
+	}
+	if blocks[0].kind != pageBlockDatabaseHeader || blocks[0].meta.StartOffset != 0 || blocks[0].meta.Size != 100 {
+		t.Fatalf("first block = %+v, want 100-byte database header at offset 0", blocks[0])
+	}
+	if blocks[1].kind != pageBlockPageHeader || blocks[1].meta.StartOffset != 100 {
+		t.Fatalf("second block = %+v, want page header at offset 100", blocks[1])
+	}
+	for idx := 1; idx < len(blocks); idx++ {
+		if blocks[idx].meta.StartOffset < blocks[idx-1].meta.StartOffset {
+			t.Fatalf("blocks are not sorted physically at %d: prev=%+v current=%+v", idx, blocks[idx-1], blocks[idx])
+		}
+	}
+}
+
+func TestHexFocusAndMovementSelectTopLevelBlocks(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	next, cmd = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	if cmd != nil {
+		t.Fatal("3 returned a command")
+	}
+	if hex.focusedPane != explorerPane {
+		t.Fatalf("3 focused pane = %v, want explorerPane", hex.focusedPane)
+	}
+	if !hex.blockSelected || hex.selectedBlock != 0 {
+		t.Fatalf("3 selected block = (%v, %d), want first block", hex.blockSelected, hex.selectedBlock)
+	}
+	if meta := hex.viewInspector(48, 12); !strings.Contains(meta, "Database Header") || !strings.Contains(meta, "Page size:") {
+		t.Fatalf("hex focus did not switch META to first block:\n%s", meta)
+	}
+
+	hex.inspectorScroll = 3
+	next, cmd = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+	moved := next.(model)
+	if cmd != nil {
+		t.Fatal("hex down returned a command")
+	}
+	if moved.selectedBlock != 1 {
+		t.Fatalf("hex down selected block %d, want 1", moved.selectedBlock)
+	}
+	if moved.inspectorScroll != 0 {
+		t.Fatalf("hex movement left inspectorScroll = %d, want reset", moved.inspectorScroll)
+	}
+	if meta := moved.viewInspector(48, 12); !strings.Contains(meta, "Page Header") || !strings.Contains(meta, "Page kind:") {
+		t.Fatalf("hex movement did not switch META to page header:\n%s", meta)
+	}
+
+	next, cmd = moved.Update(keyMsg("4"))
+	metaFocused := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	if metaFocused.focusedPane != inspectorPane || metaFocused.selectedBlock != moved.selectedBlock {
+		t.Fatalf("4 changed focus/selection to pane=%v block=%d", metaFocused.focusedPane, metaFocused.selectedBlock)
+	}
+	next, _ = metaFocused.Update(tea.KeyMsg{Type: tea.KeyDown})
+	scrolled := next.(model)
+	if scrolled.selectedBlock != metaFocused.selectedBlock {
+		t.Fatalf("META scroll changed selected block from %d to %d", metaFocused.selectedBlock, scrolled.selectedBlock)
+	}
+	if scrolled.inspectorScroll != 1 {
+		t.Fatalf("META scroll = %d, want 1", scrolled.inspectorScroll)
+	}
+}
+
+func TestMetaToHexPreservesBlockSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	next, _ = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+	hex = next.(model)
+	selectedBlock := hex.selectedBlock
+
+	next, cmd = hex.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	if meta.focusedPane != inspectorPane {
+		t.Fatalf("4 focused pane = %v, want inspectorPane", meta.focusedPane)
+	}
+
+	next, cmd = meta.Update(keyMsg("3"))
+	back := next.(model)
+	if cmd != nil {
+		t.Fatal("3 from META returned a command")
+	}
+	if back.focusedPane != explorerPane {
+		t.Fatalf("3 from META focused pane = %v, want explorerPane", back.focusedPane)
+	}
+	if !back.blockSelected || back.selectedBlock != selectedBlock {
+		t.Fatalf("3 from META selected block = (%v, %d), want (%v, %d)", back.blockSelected, back.selectedBlock, true, selectedBlock)
+	}
+}
+
+func TestMetaToHexPreservesDrillSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	parent := selectFirstDrillableBlock(t, &hex)
+	next, _ = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+	next, _ = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	drilled = next.(model)
+	stackDepth := len(drilled.drill.stack)
+	selectedChild := drilled.drill.stack[stackDepth-1].selectedChild
+
+	next, cmd = drilled.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 returned a command")
+	}
+	next, cmd = meta.Update(keyMsg("3"))
+	back := next.(model)
+	if cmd != nil {
+		t.Fatal("3 from META returned a command")
+	}
+	if back.focusedPane != explorerPane {
+		t.Fatalf("3 from META focused pane = %v, want explorerPane", back.focusedPane)
+	}
+	if !back.drill.active || back.drill.parentBlock != parent {
+		t.Fatalf("3 from META changed drill parent/state to %+v, want parent %d active", back.drill, parent)
+	}
+	if len(back.drill.stack) != stackDepth {
+		t.Fatalf("3 from META changed drill depth to %d, want %d", len(back.drill.stack), stackDepth)
+	}
+	if got := back.drill.stack[len(back.drill.stack)-1].selectedChild; got != selectedChild {
+		t.Fatalf("3 from META changed selected drill child to %d, want %d", got, selectedChild)
+	}
+	if back.selectedBlock != parent {
+		t.Fatalf("3 from META selected block %d, want parent %d", back.selectedBlock, parent)
+	}
+}
+
+func TestPagesToMetaShowsPageMetadataAfterHexDrillActivity(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	selectFirstDrillableBlock(t, &hex)
+	next, _ = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+
+	drilled.focusedPane = navPane
+	next, cmd = drilled.Update(keyMsg("4"))
+	meta := next.(model)
+	if cmd != nil {
+		t.Fatal("4 from PAGES returned a command")
+	}
+	if meta.focusedPane != inspectorPane {
+		t.Fatalf("4 from PAGES focused pane = %v, want inspectorPane", meta.focusedPane)
+	}
+	content := meta.viewInspector(52, 14)
+	for _, want := range []string{"Page 1", "STRUCTURE", "Cells:", "Pointer array:"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("page META missing %q after drill activity:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "Parent: Cell") || strings.Contains(content, "Payload Size") {
+		t.Fatalf("4 from PAGES showed drill metadata instead of page metadata:\n%s", content)
+	}
+}
+
+func TestCellBlockMetaShowsParsedValues(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	var cellBlock pageBlock
+	found := false
+	for _, block := range buildPageBlocks(loaded.currentPage) {
+		if block.kind == pageBlockTableLeafCell || block.kind == pageBlockIndexLeafCell || block.kind == pageBlockIndexInteriorCell {
+			cellBlock = block
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("fixture page has no payload-carrying cell block")
+	}
+
+	meta := strings.Join(blockMetaLines(cellBlock, loaded.currentPage), "\n")
+	for _, want := range []string{"VALUES", "00:", "serial"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("cell block meta missing parsed value token %q:\n%s", want, meta)
+		}
+	}
+	if !strings.Contains(meta, "\"") && !strings.Contains(meta, "NULL") {
+		t.Fatalf("cell block meta does not show decoded scalar values:\n%s", meta)
+	}
+}
+
+func TestCellDrillToggleMovementAndMeta(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	parent := selectFirstDrillableBlock(t, &hex)
+	children := buildDrillChildren(hex.currentPageBlocks()[parent], hex.currentPage)
+	for _, want := range []string{"Payload Size", "Record Payload"} {
+		if !hasDrillChildTitle(children, want) {
+			t.Fatalf("drill children missing %q: %+v", want, children)
+		}
+	}
+	payloadIdx := drillChildIndex(children, "Record Payload")
+	if payloadIdx < 0 {
+		t.Fatal("drill children missing Record Payload")
+	}
+	for _, want := range []string{"Record Header Size", "Serial Type 1", "Value 1"} {
+		if !hasDrillChildTitle(children[payloadIdx].children, want) {
+			t.Fatalf("record payload children missing %q: %+v", want, children[payloadIdx].children)
+		}
+	}
+
+	next, cmd = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+	if cmd != nil {
+		t.Fatal("d returned a command")
+	}
+	if !drilled.drill.active {
+		t.Fatal("d on a drillable cell did not enter drill mode")
+	}
+	if drilled.drill.parentBlock != parent || drilled.selectedBlock != parent {
+		t.Fatalf("drill parent/selected block = %d/%d, want %d", drilled.drill.parentBlock, drilled.selectedBlock, parent)
+	}
+	if len(drilled.drill.stack) != 1 {
+		t.Fatalf("drill stack depth = %d, want 1", len(drilled.drill.stack))
+	}
+
+	first, ok := drilled.selectedDrillChild()
+	if !ok {
+		t.Fatal("drill mode has no selected child")
+	}
+	meta := drilled.viewInspector(52, 14)
+	for _, want := range []string{first.title, "Parent: Cell", "Offset:", "Size:", "PARSED"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("drill meta missing %q:\n%s", want, meta)
+		}
+	}
+
+	second := children[1]
+	rowOffset := (second.meta.StartOffset / 16) * 16
+	rowEnd := rowOffset + 16
+	if rowEnd > len(drilled.currentPage.BTreePage.Raw) {
+		rowEnd = len(drilled.currentPage.BTreePage.Raw)
+	}
+	rendered := formatHexRowWithSelection(rowOffset, drilled.currentPage.BTreePage.Raw[rowOffset:rowEnd], drilled.currentPageBlocks(), first.meta, true, drilled.currentDrillChildren())
+	wantSiblingByte := drillChildStyle(second.kind).Render(fmt.Sprintf("%02X", drilled.currentPage.BTreePage.Raw[second.meta.StartOffset]))
+	if !strings.Contains(rendered, wantSiblingByte) {
+		t.Fatalf("unselected drill sibling byte did not use drill child style:\n%s", rendered)
+	}
+
+	next, cmd = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	moved := next.(model)
+	if cmd != nil {
+		t.Fatal("drill down returned a command")
+	}
+	if moved.drill.stack[len(moved.drill.stack)-1].selectedChild != drilled.drill.stack[len(drilled.drill.stack)-1].selectedChild+1 {
+		t.Fatalf("drill down selected child %d, want %d", moved.drill.stack[len(moved.drill.stack)-1].selectedChild, drilled.drill.stack[len(drilled.drill.stack)-1].selectedChild+1)
+	}
+	selectedAfterMove, ok := moved.selectedDrillChild()
+	if !ok {
+		t.Fatal("drill down left no selected child")
+	}
+	if selectedAfterMove.title == first.title && selectedAfterMove.meta == first.meta {
+		t.Fatalf("drill down did not change selected child: %+v", selectedAfterMove)
+	}
+	if meta := moved.viewInspector(52, 14); !strings.Contains(meta, selectedAfterMove.title) {
+		t.Fatalf("drill movement did not update META to %q:\n%s", selectedAfterMove.title, meta)
+	}
+
+	for moved.drill.stack[len(moved.drill.stack)-1].selectedChild < payloadIdx {
+		next, _ = moved.Update(tea.KeyMsg{Type: tea.KeyDown})
+		moved = next.(model)
+	}
+	selectedPayload, ok := moved.selectedDrillChild()
+	if !ok || selectedPayload.title != "Record Payload" {
+		t.Fatalf("selected child = %+v, want Record Payload", selectedPayload)
+	}
+
+	next, cmd = moved.Update(keyMsg("d"))
+	nested := next.(model)
+	if cmd != nil {
+		t.Fatal("d on Record Payload returned a command")
+	}
+	if !nested.drill.active || len(nested.drill.stack) != 2 {
+		t.Fatalf("d on Record Payload did not enter nested drill; state=%+v", nested.drill)
+	}
+	nestedChild, ok := nested.selectedDrillChild()
+	if !ok || nestedChild.title != "Record Header Size" {
+		t.Fatalf("nested selected child = %+v, want Record Header Size", nestedChild)
+	}
+	if meta := nested.viewInspector(52, 14); !strings.Contains(meta, "Parent: Record Payload") {
+		t.Fatalf("nested drill meta missing payload parent:\n%s", meta)
+	}
+
+	rowOffset = (nestedChild.meta.StartOffset / 16) * 16
+	rowEnd = rowOffset + 16
+	if rowEnd > len(nested.currentPage.BTreePage.Raw) {
+		rowEnd = len(nested.currentPage.BTreePage.Raw)
+	}
+	rendered = formatHexRowWithSelection(rowOffset, nested.currentPage.BTreePage.Raw[rowOffset:rowEnd], nested.currentPageBlocks(), nestedChild.meta, true, nested.currentDrillChildren())
+	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", nested.currentPage.BTreePage.Raw[nestedChild.meta.StartOffset]))
+	if !strings.Contains(rendered, wantByte) {
+		t.Fatalf("selected nested drill child byte did not use selected style:\n%s", rendered)
+	}
+
+	next, cmd = nested.Update(keyMsg("d"))
+	stillNested := next.(model)
+	if cmd != nil {
+		t.Fatal("d on nested leaf returned a command")
+	}
+	if !stillNested.drill.active || len(stillNested.drill.stack) != 2 {
+		t.Fatalf("d on nested leaf changed drill state; state=%+v", stillNested.drill)
+	}
+
+	next, cmd = stillNested.Update(keyMsg("b"))
+	backToCell := next.(model)
+	if cmd != nil {
+		t.Fatal("b in nested drill returned a command")
+	}
+	if !backToCell.drill.active || len(backToCell.drill.stack) != 1 {
+		t.Fatalf("b in nested drill did not return to parent drill; state=%+v", backToCell.drill)
+	}
+
+	backToCell.drill.stack[0].selectedChild = 0
+	next, cmd = backToCell.Update(keyMsg("d"))
+	leafNoop := next.(model)
+	if cmd != nil {
+		t.Fatal("d on non-nested drill child returned a command")
+	}
+	if !leafNoop.drill.active || len(leafNoop.drill.stack) != 1 {
+		t.Fatalf("d on non-nested leaf changed drill state; state=%+v", leafNoop.drill)
+	}
+
+	next, cmd = leafNoop.Update(keyMsg("b"))
+	exited := next.(model)
+	if cmd != nil {
+		t.Fatal("b at top drill layer returned a command")
+	}
+	if exited.drill.active {
+		t.Fatal("b at top drill layer did not exit drill mode")
+	}
+	if exited.selectedBlock != parent {
+		t.Fatalf("exiting drill selected block %d, want parent %d", exited.selectedBlock, parent)
+	}
+}
+
+func TestFooterDrillHintsAreContextual(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	if strings.Contains(m.footerLine(), "d drill") || strings.Contains(m.footerLine(), "b back") {
+		t.Fatalf("footer shows drill hints before a drillable page selection: %q", m.footerLine())
+	}
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	hex.selectedBlock = 0
+	hex.blockSelected = true
+	if strings.Contains(hex.footerLine(), "d drill") || strings.Contains(hex.footerLine(), "b back") {
+		t.Fatalf("footer shows drill hints on non-drillable block: %q", hex.footerLine())
+	}
+
+	selectFirstDrillableBlock(t, &hex)
+	if !strings.Contains(hex.footerLine(), "d drill") {
+		t.Fatalf("footer missing drill hint on drillable cell: %q", hex.footerLine())
+	}
+	if strings.Contains(hex.footerLine(), "b back") {
+		t.Fatalf("footer shows back before entering drill: %q", hex.footerLine())
+	}
+
+	next, _ = hex.Update(keyMsg("d"))
+	drilled := next.(model)
+	if strings.Contains(drilled.footerLine(), "d drill") {
+		t.Fatalf("footer shows drill hint on leaf drill child: %q", drilled.footerLine())
+	}
+	if !strings.Contains(drilled.footerLine(), "b back") {
+		t.Fatalf("footer missing back hint while drilled: %q", drilled.footerLine())
+	}
+
+	payloadIdx := drillChildIndex(drilled.currentDrillChildren(), "Record Payload")
+	for drilled.drill.stack[len(drilled.drill.stack)-1].selectedChild < payloadIdx {
+		next, _ = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+		drilled = next.(model)
+	}
+	if !strings.Contains(drilled.footerLine(), "d drill") || !strings.Contains(drilled.footerLine(), "b back") {
+		t.Fatalf("footer should show both hints on nested drillable child: %q", drilled.footerLine())
+	}
+
+	next, _ = drilled.Update(keyMsg("d"))
+	nested := next.(model)
+	if !strings.Contains(nested.footerLine(), "b back") {
+		t.Fatalf("footer missing back hint in nested drill: %q", nested.footerLine())
+	}
+	if strings.Contains(nested.footerLine(), "d drill") {
+		t.Fatalf("footer shows drill hint on nested leaf: %q", nested.footerLine())
+	}
+}
+
+func TestFooterFilterHintIsContextualToViewOne(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, _ := m.Update(keyMsg("1"))
+	btrees := next.(model)
+	if !strings.Contains(btrees.footerLine(), "f filter") {
+		t.Fatalf("footer missing filter hint in view 1: %q", btrees.footerLine())
+	}
+
+	next, cmd := btrees.Update(keyMsg("2"))
+	pages := next.(model)
+	if cmd == nil {
+		t.Fatal("2 did not activate a page")
+	}
+	if strings.Contains(pages.footerLine(), "f filter") || strings.Contains(pages.footerLine(), "f clear/switch") {
+		t.Fatalf("footer shows filter hint outside view 1: %q", pages.footerLine())
+	}
+
+	next, _ = pages.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	if strings.Contains(hex.footerLine(), "f filter") || strings.Contains(hex.footerLine(), "f clear/switch") {
+		t.Fatalf("footer shows filter hint in HEX view: %q", hex.footerLine())
+	}
+}
+
+func TestDrillNoOpAndPageChangeReset(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	hex.selectedBlock = 0
+	hex.blockSelected = true
+	next, cmd = hex.Update(keyMsg("d"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatal("d on non-drillable block returned a command")
+	}
+	if got.drill.active {
+		t.Fatal("d on non-drillable block entered drill mode")
+	}
+	if got.selectedBlock != 0 || !got.blockSelected {
+		t.Fatalf("d on non-drillable block changed selection to (%v, %d)", got.blockSelected, got.selectedBlock)
+	}
+
+	parent := selectFirstDrillableBlock(t, &got)
+	next, _ = got.Update(keyMsg("d"))
+	drilled := next.(model)
+	if !drilled.drill.active || drilled.drill.parentBlock != parent {
+		t.Fatal("setup: failed to enter drill mode")
+	}
+
+	drilled.focusedPane = navPane
+	next, cmd = drilled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	movingPage := next.(model)
+	if cmd == nil {
+		t.Fatal("moving to next page did not return a load command")
+	}
+	if movingPage.drill.active {
+		t.Fatal("page movement left drill mode active")
+	}
+	if movingPage.blockSelected {
+		t.Fatal("page movement left a selected hex block")
+	}
+}
+
+func TestDrillSubtypeStylesAreContrasting(t *testing.T) {
+	t.Parallel()
+
+	rendered := map[string]string{
+		"payload size": fmt.Sprint(drillChildStyle(drillChildPayloadSize).GetForeground()),
+		"rowid":        fmt.Sprint(drillChildStyle(drillChildRowID).GetForeground()),
+		"payload":      fmt.Sprint(drillChildStyle(drillChildRecordPayload).GetForeground()),
+	}
+
+	for leftName, left := range rendered {
+		for rightName, right := range rendered {
+			if leftName >= rightName {
+				continue
+			}
+			if left == right {
+				t.Fatalf("%s and %s render with the same style %q", leftName, rightName, left)
+			}
+		}
+	}
+}
+
+func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.height = 8
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+	blocks := hex.currentPageBlocks()
+	if len(blocks) < 5 {
+		t.Fatalf("loaded page has %d blocks, want enough blocks to test scrolling", len(blocks))
+	}
+
+	for idx := 0; idx < len(blocks)-1; idx++ {
+		next, _ = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+		hex = next.(model)
+	}
+	last := blocks[len(blocks)-1]
+	if hex.selectedBlock != len(blocks)-1 {
+		t.Fatalf("selected block %d, want last block %d", hex.selectedBlock, len(blocks)-1)
+	}
+	if last.meta.StartOffset >= 16 && hex.hexScroll == 0 {
+		t.Fatal("selecting a later block did not advance hexScroll")
+	}
+
+	view := hex.viewExplorer(80, 4)
+	rowOffset := (last.meta.StartOffset / 16) * 16
+	if !strings.Contains(view, fmt.Sprintf("%04X", rowOffset)) {
+		t.Fatalf("hex viewport did not reveal selected block starting at %d:\n%s", last.meta.StartOffset, view)
+	}
+
+	rowEnd := rowOffset + 16
+	if rowEnd > len(hex.currentPage.BTreePage.Raw) {
+		rowEnd = len(hex.currentPage.BTreePage.Raw)
+	}
+	rendered := formatHexRow(rowOffset, hex.currentPage.BTreePage.Raw[rowOffset:rowEnd], blocks, hex.selectedBlock)
+	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", hex.currentPage.BTreePage.Raw[last.meta.StartOffset]))
+	if !strings.Contains(rendered, wantByte) {
+		t.Fatalf("selected block byte did not use selected style:\n%s", rendered)
+	}
+}
+
+func selectFirstDrillableBlock(t *testing.T, m *model) int {
+	t.Helper()
+	for idx, block := range m.currentPageBlocks() {
+		if len(buildDrillChildren(block, m.currentPage)) == 0 {
+			continue
+		}
+		m.selectedBlock = idx
+		m.blockSelected = true
+		m.drill = drillState{}
+		m.revealSelectedHexBlock()
+		return idx
+	}
+	t.Fatal("fixture page has no drillable cell block")
+	return -1
+}
+
+func hasDrillChildTitle(children []drillChild, title string) bool {
+	return drillChildIndex(children, title) >= 0
+}
+
+func drillChildIndex(children []drillChild, title string) int {
+	for idx, child := range children {
+		if child.title == title {
+			return idx
+		}
+	}
+	return -1
+}
+
+func TestPageMovementResetsHexSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	next, cmd := m.Update(keyMsg("2"))
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	next, _ = loaded.Update(keyMsg("3"))
+	hex := next.(model)
+
+	hex.focusedPane = navPane
+	hex.hexScroll = 4
+	next, cmd = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
+	movingPage := next.(model)
+	if cmd == nil {
+		t.Fatal("moving to next page did not return a load command")
+	}
+	if movingPage.blockSelected {
+		t.Fatal("page movement left a selected hex block")
+	}
+	if movingPage.hexScroll != 0 {
+		t.Fatalf("page movement left hexScroll = %d, want 0", movingPage.hexScroll)
 	}
 }
 
@@ -622,6 +1386,9 @@ func TestVisibleJumpLabels(t *testing.T) {
 		if strings.Contains(view, dropped) {
 			t.Fatalf("footer still advertises removed hint %q", dropped)
 		}
+	}
+	if strings.Contains(m.footerLine(), "d drill") || strings.Contains(m.footerLine(), "b back") {
+		t.Fatalf("footer shows drill hints without a drillable selection: %q", m.footerLine())
 	}
 	for _, label := range []string{"[1] b-trees", "[2] pages", "[3] detail", "[4] meta"} {
 		if strings.Contains(m.footerLine(), label) {
@@ -679,6 +1446,46 @@ func TestContentPaneTitlesShowJumpNumbers(t *testing.T) {
 			t.Fatalf("80x24 view missing %q:\n%s", label, fullView)
 		}
 	}
+}
+
+func TestTruncateCellsPreservesANSISequences(t *testing.T) {
+	t.Parallel()
+
+	row := formatHexRowWithSelection(
+		0,
+		[]byte{0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00},
+		[]pageBlock{{kind: pageBlockDatabaseHeader, meta: sqlite.Meta{StartOffset: 0, Size: 100}}},
+		sqlite.Meta{StartOffset: 0, Size: 1},
+		true,
+		nil,
+	)
+
+	for width := 1; width < lipgloss.Width(row); width++ {
+		got := truncateCells(row, width)
+		if hasIncompleteCSI(got) {
+			t.Fatalf("truncateCells left incomplete CSI at width %d: %q", width, got)
+		}
+		if gotWidth := lipgloss.Width(got); gotWidth > width {
+			t.Fatalf("truncateCells width %d produced %d cells: %q", width, gotWidth, got)
+		}
+	}
+}
+
+func hasIncompleteCSI(s string) bool {
+	inCSI := false
+	for idx := 0; idx < len(s); idx++ {
+		if !inCSI {
+			if s[idx] == '\x1b' && idx+1 < len(s) && s[idx+1] == '[' {
+				inCSI = true
+				idx++
+			}
+			continue
+		}
+		if s[idx] >= 0x40 && s[idx] <= 0x7e {
+			inCSI = false
+		}
+	}
+	return inCSI
 }
 
 func TestStartsOnVisibleBTreeRow(t *testing.T) {

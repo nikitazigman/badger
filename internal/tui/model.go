@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/nikitazigman/badger/internal/sqlite"
 )
 
@@ -54,6 +55,13 @@ type contentTarget struct {
 	schemaName string
 }
 
+type pageMetaSource int
+
+const (
+	pageMetaFromPages pageMetaSource = iota
+	pageMetaFromHex
+)
+
 // filterSource identifies the single object PAGES is scoped to. It stores the object
 // only; the page set and skip diagnostics are derived from pageIndex on demand (the DB is
 // read-only and the index is immutable once built, so there is nothing to snapshot).
@@ -66,12 +74,15 @@ type model struct {
 	db              databaseViewModel
 	navItems        []navItem
 	selectedIndex   int
-	explorerIndex   int
 	inspectorScroll int
 	active          contentTarget
 	currentPage     *sqlite.PageInspection
-	pageRows        []pageRowViewModel
 	focusedPane     pane
+	selectedBlock   int
+	blockSelected   bool
+	drill           drillState
+	metaSource      pageMetaSource
+	hexScroll       int
 	width           int
 	height          int
 	status          string
@@ -220,8 +231,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.currentPage = msg.page
-		m.pageRows = buildPageRows(msg.page)
-		m.explorerIndex = 0
+		m.validateBlockSelection()
+		m.validateDrillSelection()
+		if m.focusedPane == explorerPane {
+			m.selectFirstHexBlockIfNeeded()
+		}
 		m.inspectorScroll = 0
 		m.loading = false
 		m.loadingVisible = false
@@ -277,8 +291,21 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "3":
 		m.focusedPane = explorerPane
+		if m.active.kind == navPage {
+			m.metaSource = pageMetaFromHex
+			m.selectFirstHexBlockIfNeeded()
+			m.revealSelectedHexBlock()
+		}
 		return m, nil
 	case "4":
+		if m.active.kind == navPage {
+			switch m.focusedPane {
+			case navPane:
+				m.metaSource = pageMetaFromPages
+			case explorerPane:
+				m.metaSource = pageMetaFromHex
+			}
+		}
 		m.focusedPane = inspectorPane
 		return m, nil
 	case "f":
@@ -297,6 +324,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "d":
+		if m.active.kind == navPage {
+			m.drillIn()
+		}
+		return m, nil
+	case "b":
+		if m.active.kind == navPage {
+			m.drillBack()
+		}
+		return m, nil
 	case "enter":
 		if m.focusedPane == navPane {
 			return m.activateSelected()
@@ -307,8 +344,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(-1) {
 				return m.activateSelected()
 			}
+		} else if m.focusedPane == explorerPane && m.active.kind == navPage && m.drill.active {
+			m.moveDrillChild(-1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
-			m.moveExplorerSelection(-1)
+			m.moveHexBlock(-1)
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(-1, 1)
 		}
@@ -318,8 +357,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.moveSelection(1) {
 				return m.activateSelected()
 			}
+		} else if m.focusedPane == explorerPane && m.active.kind == navPage && m.drill.active {
+			m.moveDrillChild(1)
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
-			m.moveExplorerSelection(1)
+			m.moveHexBlock(1)
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(1, 1)
 		}
@@ -344,16 +385,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearFilter()
 			return m, nil
 		}
-		if m.active.kind == navPage && m.focusedPane == explorerPane && m.explorerIndex > 0 {
-			m.explorerIndex = 0
-			m.inspectorScroll = 0
-			m.status = "returned to page summary"
-			return m, nil
-		}
-		m.explorerIndex = 0
 		m.loading = false
 		m.loadingVisible = false
 		m.inspectorScroll = 0
+		m.resetHexSelection()
 		m.status = "reset page selection"
 		return m, nil
 	}
@@ -405,21 +440,6 @@ func (m *model) selectFirstBTreeRow() bool {
 	return false
 }
 
-func (m *model) moveExplorerSelection(delta int) {
-	if len(m.pageRows) == 0 {
-		return
-	}
-	next := m.explorerIndex + delta
-	if next < 0 {
-		next = 0
-	}
-	if next >= len(m.pageRows) {
-		next = len(m.pageRows) - 1
-	}
-	m.explorerIndex = next
-	m.inspectorScroll = 0
-}
-
 func (m *model) scrollInspector(direction int, amount int) {
 	if amount < 1 {
 		amount = 1
@@ -430,6 +450,205 @@ func (m *model) scrollInspector(direction int, amount int) {
 	}
 }
 
+func (m *model) resetHexSelection() {
+	m.selectedBlock = 0
+	m.blockSelected = false
+	m.drill = drillState{}
+	m.hexScroll = 0
+}
+
+func (m *model) selectFirstHexBlockIfNeeded() {
+	if m.blockSelected {
+		m.validateBlockSelection()
+		return
+	}
+	if len(m.currentPageBlocks()) == 0 {
+		return
+	}
+	m.selectedBlock = 0
+	m.blockSelected = true
+}
+
+func (m *model) validateBlockSelection() {
+	if !m.blockSelected {
+		return
+	}
+	blocks := m.currentPageBlocks()
+	if len(blocks) == 0 {
+		m.resetHexSelection()
+		return
+	}
+	if m.selectedBlock < 0 {
+		m.selectedBlock = 0
+	}
+	if m.selectedBlock >= len(blocks) {
+		m.selectedBlock = len(blocks) - 1
+	}
+}
+
+func (m *model) validateDrillSelection() {
+	if !m.drill.active {
+		return
+	}
+	blocks := m.currentPageBlocks()
+	if m.drill.parentBlock < 0 || m.drill.parentBlock >= len(blocks) {
+		m.drill = drillState{}
+		return
+	}
+	children := buildDrillChildren(blocks[m.drill.parentBlock], m.currentPage)
+	if len(children) == 0 {
+		m.drill = drillState{}
+		return
+	}
+	if len(m.drill.stack) == 0 {
+		m.drill.stack = []drillFrame{{title: blocks[m.drill.parentBlock].title(), children: children}}
+	}
+	m.selectedBlock = m.drill.parentBlock
+	m.blockSelected = true
+	m.cloneDrillStack()
+	for idx := range m.drill.stack {
+		if len(m.drill.stack[idx].children) == 0 {
+			m.drill.stack = m.drill.stack[:idx]
+			break
+		}
+		m.drill.stack[idx].selectedChild = clamp(m.drill.stack[idx].selectedChild, 0, len(m.drill.stack[idx].children)-1)
+	}
+	if len(m.drill.stack) == 0 {
+		m.drill = drillState{}
+	}
+}
+
+func (m *model) moveHexBlock(delta int) {
+	blocks := m.currentPageBlocks()
+	if len(blocks) == 0 {
+		m.resetHexSelection()
+		return
+	}
+	if !m.blockSelected {
+		m.selectedBlock = 0
+		m.blockSelected = true
+		m.inspectorScroll = 0
+		m.revealSelectedHexBlock()
+		return
+	}
+	next := clamp(m.selectedBlock+delta, 0, len(blocks)-1)
+	if next == m.selectedBlock {
+		return
+	}
+	m.selectedBlock = next
+	m.inspectorScroll = 0
+	m.revealSelectedHexBlock()
+}
+
+func (m *model) drillIn() {
+	if !m.drill.active {
+		m.enterDrill()
+		return
+	}
+	child, ok := m.selectedDrillChild()
+	if ok && len(child.children) > 0 {
+		m.cloneDrillStack()
+		m.drill.stack = append(m.drill.stack, drillFrame{
+			title:    child.title,
+			children: child.children,
+		})
+		m.inspectorScroll = 0
+		m.revealSelectedDrillChild()
+		return
+	}
+}
+
+func (m *model) enterDrill() {
+	block, ok := m.selectedPageBlock()
+	if !ok {
+		return
+	}
+	children := buildDrillChildren(block, m.currentPage)
+	if len(children) == 0 {
+		return
+	}
+	m.drill = drillState{
+		active:      true,
+		parentBlock: m.selectedBlock,
+		stack: []drillFrame{{
+			title:    block.title(),
+			children: children,
+		}},
+	}
+	m.blockSelected = true
+	m.inspectorScroll = 0
+	m.revealSelectedDrillChild()
+}
+
+func (m *model) drillBack() {
+	if !m.drill.active {
+		return
+	}
+	if len(m.drill.stack) > 1 {
+		m.cloneDrillStack()
+		m.drill.stack = m.drill.stack[:len(m.drill.stack)-1]
+		m.inspectorScroll = 0
+		m.revealSelectedDrillChild()
+		return
+	}
+
+	parent := m.drill.parentBlock
+	m.drill = drillState{}
+	blocks := m.currentPageBlocks()
+	if len(blocks) == 0 {
+		m.resetHexSelection()
+		return
+	}
+	m.selectedBlock = clamp(parent, 0, len(blocks)-1)
+	m.blockSelected = true
+	m.inspectorScroll = 0
+	m.revealSelectedHexBlock()
+}
+
+func (m *model) moveDrillChild(delta int) {
+	children := m.currentDrillChildren()
+	if len(children) == 0 {
+		m.drill = drillState{}
+		return
+	}
+	m.cloneDrillStack()
+	frame := &m.drill.stack[len(m.drill.stack)-1]
+	next := clamp(frame.selectedChild+delta, 0, len(children)-1)
+	if next == frame.selectedChild {
+		return
+	}
+	frame.selectedChild = next
+	m.inspectorScroll = 0
+	m.revealSelectedDrillChild()
+}
+
+func (m *model) cloneDrillStack() {
+	if len(m.drill.stack) == 0 {
+		return
+	}
+	m.drill.stack = append([]drillFrame(nil), m.drill.stack...)
+}
+
+func (m *model) revealSelectedHexBlock() {
+	blocks := m.currentPageBlocks()
+	if !m.blockSelected || m.selectedBlock < 0 || m.selectedBlock >= len(blocks) {
+		return
+	}
+	m.hexScroll = revealHexMetaScroll(m.hexScroll, blocks[m.selectedBlock].meta, m.hexDataRows())
+}
+
+func (m *model) revealSelectedDrillChild() {
+	child, ok := m.selectedDrillChild()
+	if !ok {
+		return
+	}
+	m.hexScroll = revealHexMetaScroll(m.hexScroll, child.meta, m.hexDataRows())
+}
+
+func (m model) hexDataRows() int {
+	return max(1, m.height-4-1)
+}
+
 func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	item := m.selectedItem()
 	m.active = contentTarget{
@@ -438,18 +657,17 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	m.err = nil
 	m.loading = false
 	m.loadingVisible = false
+	m.resetHexSelection()
 
 	switch item.kind {
 	case navOverview:
 		m.status = "overview"
 		m.currentPage = nil
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		return m, nil
 	case navDBHeader:
 		m.status = "database header"
 		m.currentPage = nil
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		return m, nil
 	case navTable, navIndex:
@@ -458,13 +676,12 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("opened %s %s", item.schema.Type, item.schema.Name)
 		}
 		m.currentPage = nil
-		m.pageRows = nil
 		m.inspectorScroll = 0
 		return m, nil
 	case navPage:
 		m.active.pageNumber = item.pageNumber
-		m.explorerIndex = 0
 		m.inspectorScroll = 0
+		m.metaSource = pageMetaFromPages
 		m.loading = true
 		m.loadingVisible = false
 		m.status = ""
@@ -494,6 +711,9 @@ func (m model) View() string {
 	navWidth := clamp(availableWidth/4, 24, 34)
 	inspectorWidth := clamp(availableWidth/4, 28, 38)
 	explorerWidth := availableWidth - navWidth - inspectorWidth
+	if m.active.kind == navPage {
+		navWidth, explorerWidth, inspectorWidth = pagePaneWidths(availableWidth, navWidth, explorerWidth, inspectorWidth)
+	}
 	paneContentHeight := max(0, bodyHeight-2)
 
 	nav := m.viewNavigationColumn(navWidth, bodyHeight)
@@ -528,24 +748,93 @@ func (m model) View() string {
 	return strings.Join(lines, "\n")
 }
 
-// Persistent key-hint bars. The hints are always visible in the footer; the contextual
-// segment (a transient status, or the filter token while filtered) is prepended to them.
-const (
-	navKeys    = "↑↓ move · f filter · q quit"
-	filterKeys = "f clear/switch · ↑↓ move · q quit"
-)
+func pagePaneWidths(availableWidth int, navWidth int, explorerWidth int, inspectorWidth int) (int, int, int) {
+	const (
+		minPageNavWidth       = 22
+		minPageInspectorWidth = 24
+		minFullHexFrameWidth  = 61
+	)
+
+	deficit := minFullHexFrameWidth - explorerWidth
+	if deficit <= 0 {
+		return navWidth, explorerWidth, inspectorWidth
+	}
+
+	shrinkInspector := min(deficit, max(0, inspectorWidth-minPageInspectorWidth))
+	inspectorWidth -= shrinkInspector
+	explorerWidth += shrinkInspector
+	deficit -= shrinkInspector
+
+	shrinkNav := min(deficit, max(0, navWidth-minPageNavWidth))
+	navWidth -= shrinkNav
+	explorerWidth += shrinkNav
+
+	if explorerWidth > availableWidth {
+		explorerWidth = availableWidth
+		navWidth = 0
+		inspectorWidth = 0
+	}
+	return navWidth, explorerWidth, inspectorWidth
+}
 
 // footerLine builds the always-on footer: the key hints, with a leading context segment.
 // While filtered the context is the filter token (and the filter-aware key set); otherwise
 // it is the latest transient status, if any.
 func (m model) footerLine() string {
+	keys := m.footerKeyHints()
 	if m.isFiltered() {
-		return m.filterToken() + "  |  " + filterKeys
+		return m.filterToken() + "  |  " + keys
 	}
 	if m.status != "" {
-		return m.status + "  |  " + navKeys
+		return m.status + "  |  " + keys
 	}
-	return navKeys
+	return keys
+}
+
+func (m model) footerKeyHints() string {
+	hints := []string{"↑↓ move"}
+	if m.canDrillIn() {
+		hints = append(hints, "d drill")
+	}
+	if m.canDrillBack() {
+		hints = append(hints, "b back")
+	}
+	if m.canFilterFromFooter() {
+		if m.isFiltered() {
+			hints = append(hints, "f clear/switch")
+		} else {
+			hints = append(hints, "f filter")
+		}
+	}
+	hints = append(hints, "q quit")
+	return strings.Join(hints, " · ")
+}
+
+func (m model) canDrillIn() bool {
+	if m.active.kind != navPage {
+		return false
+	}
+	if !m.drill.active {
+		block, ok := m.selectedPageBlock()
+		if !ok {
+			return false
+		}
+		return len(buildDrillChildren(block, m.currentPage)) > 0
+	}
+	child, ok := m.selectedDrillChild()
+	return ok && len(child.children) > 0
+}
+
+func (m model) canDrillBack() bool {
+	return m.active.kind == navPage && m.drill.active
+}
+
+func (m model) canFilterFromFooter() bool {
+	if m.focusedPane != navPane {
+		return false
+	}
+	item := m.selectedItem()
+	return (item.kind == navTable || item.kind == navIndex) && item.schema != nil
 }
 
 func insetLine(line string, left int, width int) string {
@@ -584,16 +873,6 @@ func (m model) selectedItem() navItem {
 		return m.navItems[0]
 	}
 	return m.navItems[m.selectedIndex]
-}
-
-func (m model) selectedPageRow() *pageRowViewModel {
-	if len(m.pageRows) == 0 {
-		return nil
-	}
-	if m.explorerIndex < 0 || m.explorerIndex >= len(m.pageRows) {
-		return &m.pageRows[0]
-	}
-	return &m.pageRows[m.explorerIndex]
 }
 
 func (m model) viewNavigationColumn(width int, height int) string {
@@ -805,7 +1084,7 @@ func (m model) viewExplorer(width int, height int) string {
 	case navTable, navIndex:
 		lines = m.viewSchemaObject(width)
 	case navPage:
-		lines = m.viewPage(width)
+		lines = m.viewPage(width, height)
 	default:
 		lines = []string{"No content"}
 	}
@@ -825,10 +1104,7 @@ func (m model) detailHeaderText() string {
 		}
 		return "Schema Object"
 	case navPage:
-		if m.isFiltered() {
-			return objectIcon(m.activeFilter.object) + " Page"
-		}
-		return "Page"
+		return "HEX"
 	default:
 		return "No content"
 	}
@@ -836,9 +1112,25 @@ func (m model) detailHeaderText() string {
 
 func (m model) metaHeaderText() string {
 	if m.active.kind == navPage {
+		if child, ok := m.selectedDrillChild(); ok && m.pageMetaUsesHexSelection() {
+			return child.title
+		}
+		if block, ok := m.selectedPageBlock(); ok && m.pageMetaUsesHexSelection() {
+			return block.title()
+		}
 		return fmt.Sprintf("page %d", m.inspectorPageNumber())
 	}
 	return m.selectedItem().title
+}
+
+func (m model) pageMetaUsesHexSelection() bool {
+	if m.active.kind != navPage {
+		return false
+	}
+	if m.focusedPane == explorerPane {
+		return true
+	}
+	return m.focusedPane == inspectorPane && m.metaSource == pageMetaFromHex
 }
 
 func (m model) viewOverview(width int) []string {
@@ -917,71 +1209,30 @@ func (m model) viewSchemaObject(width int) []string {
 	return wrapLines(lines, width)
 }
 
-func (m model) viewPage(width int) []string {
-	item := m.selectedItem()
-	pageNumber := item.pageNumber
+func (m model) viewPage(width int, height int) []string {
+	pageNumber := m.inspectorPageNumber()
 	preservingLoadedPage := m.loading && !m.loadingVisible && m.currentPage != nil
-	if preservingLoadedPage {
-		pageNumber = m.currentPage.PageNumber
-	}
-	lines := []string{
-		fmt.Sprintf("Page number: %d", pageNumber),
-	}
-	if pageNumber == 1 {
-		lines = append(lines, "Bytes 0-99 are the database header before the b-tree page content.")
-	}
 
 	if m.loading {
-		if !m.loadingVisible && !preservingLoadedPage {
-			return wrapLines(lines, width)
-		}
 		if m.loadingVisible {
-			lines = append(lines, "", "Loading page details...")
-			return wrapLines(lines, width)
+			return wrapLines([]string{"Loading page bytes..."}, width)
+		}
+		if !preservingLoadedPage {
+			return wrapLines([]string{"Waiting for page bytes..."}, width)
 		}
 	}
 
 	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
-		lines = append(lines, "", "Waiting for page details...")
-		return wrapLines(lines, width)
+		return wrapLines([]string{"Waiting for page bytes..."}, width)
 	}
 
-	page := m.currentPage
-	lines = append(lines,
-		fmt.Sprintf("Page %d | %s | size %d | cells %d | cell area %d | freeblock %d | frag %d",
-			page.PageNumber,
-			pageKindLabel(page.BTreePage.PageHeader.PageKind.Value),
-			len(page.BTreePage.Raw),
-			page.BTreePage.PageHeader.CellCount.Value,
-			page.BTreePage.PageHeader.CellContentAreaOffset.Value,
-			page.BTreePage.PageHeader.FirstFreeblock.Value,
-			page.BTreePage.PageHeader.FragmentedFreeBytes.Value,
-		),
-		"",
-		sectionStyle.Render("STRUCTURES"),
-		fmt.Sprintf("%-18s %-14s %-7s %s", "Kind", "Range", "Size", "Notes"),
-	)
-
-	for _, row := range m.visiblePageRows(width, 12) {
-		lineStyle := navItemStyle
-		prefix := "  "
-		if row.index == m.explorerIndex {
-			lineStyle = selectedNavItemStyle
-			prefix = "> "
-		}
-		text := fmt.Sprintf("%-18s %-14s %-7s %s", row.Title, row.RangeLabel, row.SizeLabel, row.Notes)
-		lines = append(lines, lineStyle.Width(width).Render(prefix+truncateLine(text, width-2)))
-	}
-
-	lines = append(lines, "", mutedStyle.Render("Focus explorer to move through page structures."))
-
-	return wrapLines(lines, width)
+	return m.renderHexRows(width, height)
 }
 
 func (m model) viewInspector(width int, height int) string {
 	item := m.selectedItem()
 	if m.active.kind == navPage {
-		if content := m.viewPageInspector(width); content != "" {
+		if content := m.viewPageMeta(); content != "" {
 			return m.renderInspectorViewport(strings.Split(content, "\n"), width, height)
 		}
 	}
@@ -1064,8 +1315,6 @@ func (m model) viewInspector(width int, height int) string {
 			"",
 			sectionStyle.Render("ACTIONS"),
 			"- move in navigation to load pages",
-			"- [ previous page",
-			"- ] next page",
 		)
 	}
 
@@ -1076,54 +1325,58 @@ func (m model) viewInspector(width int, height int) string {
 	return m.renderInspectorViewport(lines, width, height)
 }
 
-func (m model) viewPageInspector(width int) string {
+func (m model) viewPageMeta() string {
 	pageNumber := m.inspectorPageNumber()
 	lines := []string{}
 
 	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
 		if m.loadingVisible {
-			lines = append(lines, "", "Page details are loading.")
+			lines = append(lines, "Page metadata is loading.")
+		} else {
+			lines = append(lines, "Waiting for page metadata.")
 		}
 		return strings.Join(lines, "\n")
 	}
 
-	row := m.selectedPageRow()
-	if row == nil {
-		lines = append(lines, "", "No page structure selected.")
-		return strings.Join(lines, "\n")
+	page := m.currentPage
+	if child, ok := m.selectedDrillChild(); ok && m.pageMetaUsesHexSelection() {
+		return strings.Join(drillChildMetaLines(child), "\n")
+	}
+	if block, ok := m.selectedPageBlock(); ok && m.pageMetaUsesHexSelection() {
+		return strings.Join(blockMetaLines(block, page), "\n")
 	}
 
-	pageSize := m.pageSizeForCurrentPage()
-	fileStart := row.Meta.FileStartOffset(pageNumber, pageSize)
-	fileEndExclusive := row.Meta.FileEndOffset(pageNumber, pageSize)
-	fileEnd := fileEndExclusive
-	if row.Meta.Size > 0 {
-		fileEnd = fileEndExclusive - 1
+	header := page.BTreePage.PageHeader
+	pointerBytes := len(page.BTreePage.CellPointerArray.Pointers) * 2
+	unallocatedBytes := 0
+	for _, region := range page.BTreePage.UnallocatedRegions {
+		unallocatedBytes += region.Meta.Size
 	}
 
 	lines = append(lines,
-		fmt.Sprintf("Type: %s", row.Title),
-		fmt.Sprintf("Page range: %s", row.RangeLabel),
-		fmt.Sprintf("File range: %d..%d", fileStart, fileEnd),
-		fmt.Sprintf("Byte size: %d", row.Meta.Size),
+		fmt.Sprintf("Page %d", page.PageNumber),
+		fmt.Sprintf("Type: %s", pageKindLabel(header.PageKind.Value)),
+		fmt.Sprintf("Page size: %d bytes", len(page.BTreePage.Raw)),
+		fmt.Sprintf("File offset: %d", (page.PageNumber-1)*m.db.PageSize),
 		"",
-		sectionStyle.Render("RAW BYTES"),
-		row.RawHex,
+		sectionStyle.Render("STRUCTURE"),
+		fmt.Sprintf("Cells: %d", header.CellCount.Value),
+		fmt.Sprintf("Cell content start: %d", header.CellContentAreaOffset.Value),
+		fmt.Sprintf("First freeblock: %d", header.FirstFreeblock.Value),
+		fmt.Sprintf("Fragmented free bytes: %d", header.FragmentedFreeBytes.Value),
+		fmt.Sprintf("Pointer array: %d bytes", pointerBytes),
+		fmt.Sprintf("Freeblocks: %d", len(page.BTreePage.Freeblocks)),
+		fmt.Sprintf("Unallocated: %d bytes", unallocatedBytes),
 	)
-	if row.RawASCII != "" {
-		lines = append(lines, "ASCII: "+row.RawASCII)
+
+	if m.activeFilter != nil {
+		lines = append(lines,
+			"",
+			sectionStyle.Render("BTREE"),
+			fmt.Sprintf("Object: %s", m.activeFilter.object.Name),
+			fmt.Sprintf("Root page: %d", m.activeFilter.object.RootPage),
+		)
 	}
-
-	lines = append(lines, "", sectionStyle.Render("BYTE MAP"))
-	lines = append(lines, row.ByteMap...)
-
-	lines = append(lines, "", sectionStyle.Render("PARSED FIELDS"))
-	for _, field := range row.ParsedFields {
-		lines = append(lines, fmt.Sprintf("%s: %s", field.Label, field.Value))
-	}
-
-	lines = append(lines, "", sectionStyle.Render("DECODED"))
-	lines = append(lines, row.DecodedLines...)
 
 	return strings.Join(lines, "\n")
 }
@@ -1135,6 +1388,45 @@ func (m model) inspectorPageNumber() uint32 {
 		pageNumber = m.currentPage.PageNumber
 	}
 	return pageNumber
+}
+
+func (m model) currentPageBlocks() []pageBlock {
+	pageNumber := m.inspectorPageNumber()
+	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+		return nil
+	}
+	return buildPageBlocks(m.currentPage)
+}
+
+func (m model) selectedPageBlock() (pageBlock, bool) {
+	blocks := m.currentPageBlocks()
+	if !m.blockSelected || m.selectedBlock < 0 || m.selectedBlock >= len(blocks) {
+		return pageBlock{}, false
+	}
+	return blocks[m.selectedBlock], true
+}
+
+func (m model) currentDrillChildren() []drillChild {
+	if !m.drill.active || m.currentPage == nil || len(m.drill.stack) == 0 {
+		return nil
+	}
+	blocks := m.currentPageBlocks()
+	if m.drill.parentBlock < 0 || m.drill.parentBlock >= len(blocks) {
+		return nil
+	}
+	return m.drill.stack[len(m.drill.stack)-1].children
+}
+
+func (m model) selectedDrillChild() (drillChild, bool) {
+	children := m.currentDrillChildren()
+	if len(m.drill.stack) == 0 {
+		return drillChild{}, false
+	}
+	selected := m.drill.stack[len(m.drill.stack)-1].selectedChild
+	if selected < 0 || selected >= len(children) {
+		return drillChild{}, false
+	}
+	return children[selected], true
 }
 
 func paneInnerWidth(outerWidth int) int {
@@ -1207,51 +1499,101 @@ func renderScrollbar(lines []string, contentWidth int, height int, scroll int, m
 	return strings.Join(out, "\n")
 }
 
-type visiblePageRow struct {
-	index int
-	pageRowViewModel
-}
-
-func (m model) visiblePageRows(width int, limit int) []visiblePageRow {
-	if len(m.pageRows) == 0 {
+func (m model) renderHexRows(width int, height int) []string {
+	if height <= 0 {
 		return nil
 	}
-
-	if limit <= 0 || limit > len(m.pageRows) {
-		limit = len(m.pageRows)
+	if m.currentPage == nil {
+		return []string{"No page bytes."}
 	}
-	start := m.explorerIndex - limit/2
-	if start < 0 {
-		start = 0
-	}
-	end := start + limit
-	if end > len(m.pageRows) {
-		end = len(m.pageRows)
-		start = max(0, end-limit)
+	raw := m.currentPage.BTreePage.Raw
+	if len(raw) == 0 {
+		return []string{"No page bytes."}
 	}
 
-	rows := make([]visiblePageRow, 0, end-start)
-	for idx := start; idx < end; idx++ {
-		rows = append(rows, visiblePageRow{
-			index:            idx,
-			pageRowViewModel: m.pageRows[idx],
-		})
+	lines := []string{hexOffsetStyle.Render(truncateCells("Offset   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F", width))}
+	blocks := buildPageBlocks(m.currentPage)
+	selectedMeta, hasSelectedMeta := m.selectedHexMeta(blocks)
+	drillChildren := m.currentDrillChildren()
+	dataRows := max(0, height-1)
+	scroll := clamp(m.hexScroll, 0, max(0, (len(raw)+15)/16-dataRows))
+	if hasSelectedMeta {
+		scroll = revealHexMetaScroll(scroll, selectedMeta, dataRows)
 	}
-	_ = width
-	return rows
+	for offset := scroll * 16; offset < len(raw) && len(lines) < height; offset += 16 {
+		end := offset + 16
+		if end > len(raw) {
+			end = len(raw)
+		}
+		lines = append(lines, truncateCells(formatHexRowWithSelection(offset, raw[offset:end], blocks, selectedMeta, hasSelectedMeta, drillChildren), width))
+	}
+	return lines
 }
 
-func (m model) pageSizeForCurrentPage() uint32 {
-	if m.currentPage != nil && m.currentPage.DBHeader != nil && m.currentPage.DBHeader.PageSize > 0 {
-		return m.currentPage.DBHeader.PageSize
+func (m model) selectedHexMeta(blocks []pageBlock) (sqlite.Meta, bool) {
+	if child, ok := m.selectedDrillChild(); ok {
+		return child.meta, true
 	}
-	if m.db.PageSize > 0 {
-		return m.db.PageSize
+	if m.blockSelected && m.selectedBlock >= 0 && m.selectedBlock < len(blocks) {
+		return blocks[m.selectedBlock].meta, true
 	}
-	return 1
+	return sqlite.Meta{}, false
+}
+
+func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) string {
+	selectedMeta := sqlite.Meta{}
+	hasSelectedMeta := false
+	if selected >= 0 && selected < len(blocks) {
+		selectedMeta = blocks[selected].meta
+		hasSelectedMeta = true
+	}
+	return formatHexRowWithSelection(offset, chunk, blocks, selectedMeta, hasSelectedMeta, nil)
+}
+
+func formatHexRowWithSelection(offset int, chunk []byte, blocks []pageBlock, selectedMeta sqlite.Meta, hasSelectedMeta bool, drillChildren []drillChild) string {
+	var b strings.Builder
+	b.WriteString(hexOffsetStyle.Render(fmt.Sprintf("%04X     ", offset)))
+	for idx := 0; idx < 16; idx++ {
+		if idx > 0 {
+			if idx == 8 {
+				b.WriteString("  ")
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+		if idx < len(chunk) {
+			byteOffset := offset + idx
+			token := fmt.Sprintf("%02X", chunk[idx])
+			b.WriteString(styleHexByte(token, byteOffset, blocks, selectedMeta, hasSelectedMeta, drillChildren))
+		} else {
+			b.WriteString("  ")
+		}
+	}
+	return b.String()
+}
+
+func styleHexByte(token string, offset int, blocks []pageBlock, selectedMeta sqlite.Meta, hasSelectedMeta bool, drillChildren []drillChild) string {
+	if hasSelectedMeta && offset >= selectedMeta.StartOffset && offset < selectedMeta.EndOffset() {
+		return selectedHexByteStyle.Render(token)
+	}
+	for _, child := range drillChildren {
+		if offset >= child.meta.StartOffset && offset < child.meta.EndOffset() {
+			return drillChildStyle(child.kind).Render(token)
+		}
+	}
+	for _, block := range blocks {
+		if offset < block.meta.StartOffset || offset >= block.meta.EndOffset() {
+			continue
+		}
+		return blockStyle(block.kind).Render(token)
+	}
+	return unknownHexByteStyle.Render(token)
 }
 
 func detailFrameTitle(title string) string {
+	if title == "HEX" {
+		return "[3] HEX"
+	}
 	return "[3] DETAIL  " + title
 }
 
@@ -1260,17 +1602,76 @@ func metaFrameTitle(title string) string {
 }
 
 var (
-	sectionStyle               = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	navSectionTitleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	activeNavSectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
-	statusStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
-	navItemStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	selectedNavItemStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
-	mutedStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errorStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	scrollbarTrackStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	scrollbarThumbStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	sectionStyle                 = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
+	navSectionTitleStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
+	activeNavSectionTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
+	statusStyle                  = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
+	navItemStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	selectedNavItemStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
+	mutedStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	hexOffsetStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	unknownHexByteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	dbHeaderHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	pageHeaderHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	pointerArrayHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	freeblockHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	unallocatedHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	cellHexByteStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
+	selectedHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("25")).Bold(true)
+	payloadSizeHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	rowIDHexByteStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
+	leftChildPageHexByteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	recordPayloadHexByteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("120"))
+	recordHeaderSizeHexByteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("229"))
+	serialTypeHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("183"))
+	recordValueHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	overflowPointerHexByteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	errorStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	scrollbarTrackStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
+
+func drillChildStyle(kind drillChildKind) lipgloss.Style {
+	switch kind {
+	case drillChildPayloadSize:
+		return payloadSizeHexByteStyle
+	case drillChildRowID:
+		return rowIDHexByteStyle
+	case drillChildLeftChildPage:
+		return leftChildPageHexByteStyle
+	case drillChildRecordPayload:
+		return recordPayloadHexByteStyle
+	case drillChildRecordHeaderSize:
+		return recordHeaderSizeHexByteStyle
+	case drillChildSerialType:
+		return serialTypeHexByteStyle
+	case drillChildRecordValue:
+		return recordValueHexByteStyle
+	case drillChildOverflowPointer:
+		return overflowPointerHexByteStyle
+	default:
+		return cellHexByteStyle
+	}
+}
+
+func blockStyle(kind pageBlockKind) lipgloss.Style {
+	switch kind {
+	case pageBlockDatabaseHeader:
+		return dbHeaderHexByteStyle
+	case pageBlockPageHeader:
+		return pageHeaderHexByteStyle
+	case pageBlockPointerArray:
+		return pointerArrayHexByteStyle
+	case pageBlockFreeblock:
+		return freeblockHexByteStyle
+	case pageBlockUnallocated:
+		return unallocatedHexByteStyle
+	case pageBlockTableLeafCell, pageBlockTableInteriorCell, pageBlockIndexLeafCell, pageBlockIndexInteriorCell:
+		return cellHexByteStyle
+	default:
+		return unknownHexByteStyle
+	}
+}
 
 // buildNavItems builds the flat nav list. Tables and indexes share one B-TREES section.
 // The PAGES section lists filteredPages when filter != nil (an empty list for a virtual
@@ -1511,6 +1912,13 @@ func max(a int, b int) int {
 	return b
 }
 
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func truncateLine(text string, width int) string {
 	if width <= 0 {
 		return ""
@@ -1533,27 +1941,7 @@ func truncateCells(text string, width int) string {
 		return text
 	}
 	if width <= 1 {
-		for _, r := range text {
-			cellWidth := lipgloss.Width(string(r))
-			if cellWidth <= width {
-				return string(r)
-			}
-			return ""
-		}
-		return ""
+		return xansi.Truncate(text, width, "")
 	}
-
-	var b strings.Builder
-	used := 0
-	ellipsisWidth := lipgloss.Width("…")
-	for _, r := range text {
-		cellWidth := lipgloss.Width(string(r))
-		if used+cellWidth+ellipsisWidth > width {
-			break
-		}
-		b.WriteRune(r)
-		used += cellWidth
-	}
-	b.WriteString("…")
-	return b.String()
+	return xansi.Truncate(text, width, "…")
 }
