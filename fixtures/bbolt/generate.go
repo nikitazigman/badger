@@ -7,29 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
 
 func main() {
-	if err := os.RemoveAll("fixtures/bbolt/empty"); err != nil {
-		panic(err)
-	}
-	if err := os.RemoveAll("fixtures/bbolt/single_bucket"); err != nil {
-		panic(err)
-	}
-	if err := os.RemoveAll("fixtures/bbolt/nested_buckets"); err != nil {
-		panic(err)
-	}
-	if err := os.RemoveAll("fixtures/bbolt/large_values"); err != nil {
-		panic(err)
-	}
+	cleanupFixtures()
 
-	mustCreate("fixtures/bbolt/empty/empty.db", func(db *bolt.DB) error {
+	mustCreate("fixtures/bbolt/empty.db", func(db *bolt.DB) error {
 		return nil
 	})
 
-	mustCreate("fixtures/bbolt/single_bucket/users.db", func(db *bolt.DB) error {
+	mustCreate("fixtures/bbolt/users.db", func(db *bolt.DB) error {
 		return db.Update(func(tx *bolt.Tx) error {
 			bucket, err := tx.CreateBucketIfNotExists([]byte("users"))
 			if err != nil {
@@ -44,44 +34,84 @@ func main() {
 		})
 	})
 
-	mustCreate("fixtures/bbolt/nested_buckets/app.db", func(db *bolt.DB) error {
-		if err := db.Update(func(tx *bolt.Tx) error {
-			accounts, err := tx.CreateBucketIfNotExists([]byte("accounts"))
-			if err != nil {
-				return err
-			}
-			alice, err := accounts.CreateBucketIfNotExists([]byte("alice"))
-			if err != nil {
-				return err
-			}
-			if err := alice.Put([]byte("plan"), []byte("pro")); err != nil {
-				return err
-			}
-			return accounts.Put([]byte("count"), []byte("1"))
-		}); err != nil {
-			return err
-		}
+	mustCreate("fixtures/bbolt/many_buckets.db", func(db *bolt.DB) error {
 		return db.Update(func(tx *bolt.Tx) error {
-			settings, err := tx.CreateBucketIfNotExists([]byte("settings"))
-			if err != nil {
-				return err
+			for i := range 24 {
+				name := []byte(fmt.Sprintf("bucket_%02d", i))
+				bucket, err := tx.CreateBucketIfNotExists(name)
+				if err != nil {
+					return err
+				}
+				for j := range 8 {
+					if err := bucket.Put([]byte(fmt.Sprintf("key_%02d", j)), []byte(fmt.Sprintf("value_%02d_%02d", i, j))); err != nil {
+						return err
+					}
+				}
 			}
-			if err := settings.Put([]byte("theme"), []byte("dark")); err != nil {
-				return err
-			}
-			return settings.Put([]byte("timezone"), []byte("UTC"))
+			return nil
 		})
 	})
 
-	mustCreate("fixtures/bbolt/large_values/events.db", func(db *bolt.DB) error {
+	mustCreate("fixtures/bbolt/nested_inline.db", func(db *bolt.DB) error {
+		return db.Update(func(tx *bolt.Tx) error {
+			for _, rootName := range []string{"alpha", "beta", "gamma"} {
+				root, err := tx.CreateBucketIfNotExists([]byte(rootName))
+				if err != nil {
+					return err
+				}
+				if err := root.Put([]byte("root_value"), []byte("root_"+rootName)); err != nil {
+					return err
+				}
+				current := root
+				for depth := 1; depth <= 5; depth++ {
+					inline, err := current.CreateBucketIfNotExists([]byte(fmt.Sprintf("inline_%d", depth)))
+					if err != nil {
+						return err
+					}
+					if err := inline.Put([]byte("kind"), []byte("small_inline_bucket")); err != nil {
+						return err
+					}
+
+					next, err := current.CreateBucketIfNotExists([]byte(fmt.Sprintf("level_%d", depth)))
+					if err != nil {
+						return err
+					}
+					if err := next.Put([]byte("depth"), []byte(strconv.Itoa(depth))); err != nil {
+						return err
+					}
+					current = next
+				}
+			}
+			return nil
+		})
+	})
+
+	mustCreate("fixtures/bbolt/overflow.db", func(db *bolt.DB) error {
+		return db.Update(func(tx *bolt.Tx) error {
+			large, err := tx.CreateBucketIfNotExists([]byte("large_values"))
+			if err != nil {
+				return err
+			}
+			for i := range 48 {
+				key := []byte(fmt.Sprintf("blob_%03d", i))
+				value := []byte(fmt.Sprintf("payload_%03d_%s", i, repeated(byte('a'+i%26), 32*1024+(i%5)*8192)))
+				if err := large.Put(key, value); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+
+	mustCreate("fixtures/bbolt/branch_pages.db", func(db *bolt.DB) error {
 		return db.Update(func(tx *bolt.Tx) error {
 			events, err := tx.CreateBucketIfNotExists([]byte("events"))
 			if err != nil {
 				return err
 			}
-			for i := range 128 {
-				key := []byte(fmt.Sprintf("event-%03d", i))
-				value := []byte(fmt.Sprintf("payload-%03d-%s", i, repeated('x', 512+(i%7)*83)))
+			for i := range 12000 {
+				key := []byte(fmt.Sprintf("event_%05d", i))
+				value := []byte(fmt.Sprintf("type=branch-test seq=%05d payload=%s", i, repeated(byte('0'+i%10), 96)))
 				if err := events.Put(key, value); err != nil {
 					return err
 				}
@@ -91,12 +121,31 @@ func main() {
 	})
 }
 
+func cleanupFixtures() {
+	for _, path := range []string{
+		"fixtures/bbolt/empty",
+		"fixtures/bbolt/single_bucket",
+		"fixtures/bbolt/nested_buckets",
+		"fixtures/bbolt/large_values",
+		"fixtures/bbolt/empty.db",
+		"fixtures/bbolt/users.db",
+		"fixtures/bbolt/many_buckets.db",
+		"fixtures/bbolt/nested_inline.db",
+		"fixtures/bbolt/overflow.db",
+		"fixtures/bbolt/branch_pages.db",
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			panic(err)
+		}
+	}
+}
+
 func mustCreate(path string, fill func(*bolt.DB) error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		panic(err)
 	}
 
-	db, err := bolt.Open(path, 0o600, nil)
+	db, err := bolt.Open(path, 0o600, fixtureOptions())
 	if err != nil {
 		panic(err)
 	}
@@ -108,6 +157,17 @@ func mustCreate(path string, fill func(*bolt.DB) error) {
 
 	if err := fill(db); err != nil {
 		panic(err)
+	}
+}
+
+func fixtureOptions() *bolt.Options {
+	return &bolt.Options{
+		Timeout:         time.Second,
+		NoGrowSync:      true,
+		FreelistType:    bolt.FreelistArrayType,
+		InitialMmapSize: 64 << 20,
+		PageSize:        4096,
+		NoSync:          true,
 	}
 }
 
