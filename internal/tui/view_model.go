@@ -72,7 +72,7 @@ func newDatabaseViewModel(overview *storage.DatabaseOverview) (databaseViewModel
 		}
 
 		switch item.Kind {
-		case storage.BTreeTable, storage.BTreeRootless:
+		case storage.BTreeTable, storage.BTreeBucket, storage.BTreeInlineBucket, storage.BTreeRootless:
 			db.Tables = append(db.Tables, object)
 		case storage.BTreeIndex:
 			db.Indexes = append(db.Indexes, object)

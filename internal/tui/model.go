@@ -1663,6 +1663,8 @@ func blockStyle(kind string) lipgloss.Style {
 		return dbHeaderHexByteStyle
 	case pageBlockPageHeader:
 		return pageHeaderHexByteStyle
+	case pageBlockMetaPayload:
+		return dbHeaderHexByteStyle
 	case pageBlockPointerArray:
 		return pointerArrayHexByteStyle
 	case pageBlockFreeblock:

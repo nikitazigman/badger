@@ -16,12 +16,12 @@ func Open(path string) (Database, error) {
 	defer f.Close()
 
 	header := make([]byte, len(sqliteMagic))
-	if _, err := f.ReadAt(header, 0); err != nil {
-		return nil, err
+	if _, err := f.ReadAt(header, 0); err == nil && bytes.Equal(header, sqliteMagic) {
+		return openSQLite(path)
 	}
 
-	if bytes.Equal(header, sqliteMagic) {
-		return openSQLite(path)
+	if db, err := openBbolt(path); err == nil {
+		return db, nil
 	}
 
 	return nil, fmt.Errorf("unsupported database engine")

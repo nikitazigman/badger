@@ -18,6 +18,43 @@ type Meta struct {
 	Size        int
 }
 
+func (m Meta) Valid() bool {
+	return m.StartOffset >= 0 && m.Size >= 0
+}
+
+func (m Meta) EndOffset() int {
+	return m.StartOffset + m.Size
+}
+
+func metaFromOffset(start int, size int) Meta {
+	return Meta{StartOffset: start, Size: size}
+}
+
+type Uint16Field struct {
+	Meta  Meta
+	Value uint16
+}
+
+type Uint32Field struct {
+	Meta  Meta
+	Value uint32
+}
+
+type Uint64Field struct {
+	Meta  Meta
+	Value uint64
+}
+
+type PageIDField struct {
+	Meta  Meta
+	Value PageID
+}
+
+type FlagField struct {
+	Meta  Meta
+	Value FlagType
+}
+
 type FlagType uint16
 type PageID uint64
 
@@ -30,10 +67,10 @@ const (
 
 type PageHeader struct {
 	Meta     Meta
-	ID       PageID
-	Flags    FlagType
-	Count    uint16
-	Overflow uint32
+	ID       PageIDField
+	Flags    FlagField
+	Count    Uint16Field
+	Overflow Uint32Field
 }
 
 const (
@@ -43,16 +80,16 @@ const (
 
 type MetaPayload struct {
 	Meta          Meta
-	Magic         uint32
-	Version       uint32
-	PageSize      uint32
-	Flags         uint32
-	Root          PageID
-	Sequence      uint64
-	FreeList      PageID
-	PageID        PageID
-	TransactionID uint64
-	CheckSum      uint64 // FNV-1 checksum
+	Magic         Uint32Field
+	Version       Uint32Field
+	PageSize      Uint32Field
+	Flags         Uint32Field
+	Root          PageIDField
+	Sequence      Uint64Field
+	FreeList      PageIDField
+	PageID        PageIDField
+	TransactionID Uint64Field
+	CheckSum      Uint64Field // FNV-1 checksum
 }
 
 type BranchPayload struct {

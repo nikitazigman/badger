@@ -10,6 +10,7 @@ import (
 const (
 	pageBlockDatabaseHeader    = "database_header"
 	pageBlockPageHeader        = "page_header"
+	pageBlockMetaPayload       = "meta_payload"
 	pageBlockPointerArray      = "pointer_array"
 	pageBlockFreeblock         = "freeblock"
 	pageBlockUnallocated       = "unallocated"

@@ -1234,6 +1234,18 @@ func TestDrillSubtypeStylesAreContrasting(t *testing.T) {
 	}
 }
 
+func TestMetaPayloadBlockStyleIsNotUnknown(t *testing.T) {
+	t.Parallel()
+
+	got := fmt.Sprint(blockStyle(pageBlockMetaPayload).GetForeground())
+	if got == fmt.Sprint(unknownHexByteStyle.GetForeground()) {
+		t.Fatalf("meta payload block uses unknown hex style %q", got)
+	}
+	if got == "" {
+		t.Fatal("meta payload block has no foreground style")
+	}
+}
+
 func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 	t.Parallel()
 
