@@ -23,8 +23,28 @@ type DatabaseOverview struct {
 	FirstPageID       uint64
 	DatabaseSizeBytes uint64
 
-	HeaderRows []Field
-	BTrees     []BTreeItem
+	HeaderRows    []Field
+	BTrees        []BTreeItem
+	PageSummaries []PageSummary
+}
+
+type PageClassification string
+
+const (
+	PageClassMeta         PageClassification = "meta"
+	PageClassBranch       PageClassification = "branch"
+	PageClassLeaf         PageClassification = "leaf"
+	PageClassFreelist     PageClassification = "freelist"
+	PageClassFree         PageClassification = "free"
+	PageClassContinuation PageClassification = "continuation"
+	PageClassUnknown      PageClassification = "unknown"
+	PageClassTruncated    PageClassification = "truncated"
+)
+
+type PageSummary struct {
+	Ref            PageRef
+	Classification PageClassification
+	Label          string
 }
 
 type BTreeID string

@@ -1616,6 +1616,7 @@ var (
 	unknownHexByteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	dbHeaderHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
 	pageHeaderHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	freelistHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("174"))
 	pointerArrayHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
 	freeblockHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
 	unallocatedHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
@@ -1629,6 +1630,9 @@ var (
 	serialTypeHexByteStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("183"))
 	recordValueHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
 	overflowPointerHexByteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	leafDescriptorHexByteStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	leafKeyHexByteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
+	leafValueHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
 	errorStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	scrollbarTrackStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollbarThumbStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
@@ -1652,6 +1656,14 @@ func drillChildStyle(kind string) lipgloss.Style {
 		return recordValueHexByteStyle
 	case drillChildOverflowPointer:
 		return overflowPointerHexByteStyle
+	case drillChildLeafDescriptor:
+		return leafDescriptorHexByteStyle
+	case drillChildLeafKey:
+		return leafKeyHexByteStyle
+	case drillChildLeafValue:
+		return leafValueHexByteStyle
+	case drillChildLeafEntry:
+		return cellHexByteStyle
 	default:
 		return cellHexByteStyle
 	}
@@ -1665,6 +1677,16 @@ func blockStyle(kind string) lipgloss.Style {
 		return pageHeaderHexByteStyle
 	case pageBlockMetaPayload:
 		return dbHeaderHexByteStyle
+	case pageBlockFreelistPayload:
+		return freelistHexByteStyle
+	case pageBlockLeafDescriptors, pageBlockLeafDescriptor:
+		return leafDescriptorHexByteStyle
+	case pageBlockLeafKey:
+		return leafKeyHexByteStyle
+	case pageBlockLeafValue:
+		return leafValueHexByteStyle
+	case pageBlockLeafEntry:
+		return cellHexByteStyle
 	case pageBlockPointerArray:
 		return pointerArrayHexByteStyle
 	case pageBlockFreeblock:

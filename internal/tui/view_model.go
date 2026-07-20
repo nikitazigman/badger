@@ -35,6 +35,7 @@ type databaseViewModel struct {
 	HeaderRows         []storage.Field
 	Tables             []schemaObjectViewModel
 	Indexes            []schemaObjectViewModel
+	PageSummaries      map[uint64]storage.PageSummary
 }
 
 func newDatabaseViewModel(overview *storage.DatabaseOverview) (databaseViewModel, error) {
@@ -52,6 +53,10 @@ func newDatabaseViewModel(overview *storage.DatabaseOverview) (databaseViewModel
 		EncodingLabel:      stringFromHeader(overview.HeaderRows, "Encoding"),
 		SQLiteVersionLabel: stringFromHeader(overview.HeaderRows, "SQLite version"),
 		HeaderRows:         overview.HeaderRows,
+		PageSummaries:      map[uint64]storage.PageSummary{},
+	}
+	for _, summary := range overview.PageSummaries {
+		db.PageSummaries[summary.Ref.ID] = summary
 	}
 
 	for _, item := range overview.BTrees {

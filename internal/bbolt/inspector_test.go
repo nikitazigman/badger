@@ -178,6 +178,213 @@ func TestInspectPageRecordsHeaderAndMetaSpans(t *testing.T) {
 	}
 }
 
+func TestOpenParsesPersistedFreelistAndClassifiesFreePages(t *testing.T) {
+	t.Parallel()
+
+	path := writeSyntheticFreelistDB(t)
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	summaries := inspector.PageSummaries()
+	if summaries[2].Classification != PageClassFreelist {
+		t.Fatalf("page 2 classification = %q, want %q", summaries[2].Classification, PageClassFreelist)
+	}
+	if summaries[4].Classification != PageClassFree {
+		t.Fatalf("page 4 classification = %q, want %q", summaries[4].Classification, PageClassFree)
+	}
+
+	freelist, err := inspector.InspectPage(2)
+	if err != nil {
+		t.Fatalf("InspectPage(freelist) returned error: %v", err)
+	}
+	if freelist.FreelistPayload == nil {
+		t.Fatal("freelist page missing parsed freelist payload")
+	}
+	if len(freelist.FreelistPayload.IDs) != 1 || freelist.FreelistPayload.IDs[0] != 4 {
+		t.Fatalf("freelist IDs = %v, want [4]", freelist.FreelistPayload.IDs)
+	}
+	assertMeta(t, freelist.FreelistPayload.IDFields[0].Meta, 16, 8)
+}
+
+func TestFreePageClassificationPrecedesStaleHeader(t *testing.T) {
+	t.Parallel()
+
+	path := writeSyntheticFreelistDB(t)
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	page, err := inspector.InspectPage(4)
+	if err != nil {
+		t.Fatalf("InspectPage(free stale leaf) returned error: %v", err)
+	}
+	if page.Header.Flags.Value != LeafPageFlag {
+		t.Fatalf("stale header flag = 0x%x, want leaf", uint16(page.Header.Flags.Value))
+	}
+	if page.Classification != PageClassFree {
+		t.Fatalf("classification = %q, want %q", page.Classification, PageClassFree)
+	}
+	if page.LeafPayload != nil {
+		t.Fatal("free page parsed stale leaf payload")
+	}
+}
+
+func TestInspectLeafPageParsesOrdinaryKeyValueEntriesFromFixtures(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		fixturePath("single_bucket", "users.db"),
+		fixturePath("nested_buckets", "app.db"),
+		fixturePath("large_values", "events.db"),
+	} {
+		inspector, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open(%s) returned error: %v", path, err)
+		}
+
+		found := false
+		config := inspector.Config()
+		for id := PageID(0); id < config.HighWaterMark && !found; id++ {
+			page, err := inspector.InspectPage(id)
+			if err != nil {
+				t.Fatalf("InspectPage(%d) in %s returned error: %v", id, path, err)
+			}
+			if page.LeafPayload == nil {
+				continue
+			}
+			for idx, element := range page.LeafPayload.LeafElements {
+				if element.Flags.Value != OrdinaryKeyValueFlag {
+					continue
+				}
+				if idx >= len(page.LeafPayload.KeyValue) {
+					t.Fatalf("leaf element %d missing key/value payload", idx)
+				}
+				kv := page.LeafPayload.KeyValue[idx]
+				if len(kv.Key.Data) == 0 {
+					t.Fatalf("ordinary leaf entry %d on page %d has empty key", idx, id)
+				}
+				if kv.Key.Meta.Size != len(kv.Key.Data) {
+					t.Fatalf("key span size = %d, key bytes = %d", kv.Key.Meta.Size, len(kv.Key.Data))
+				}
+				if kv.Value.Meta.Size != len(kv.Value.Data) {
+					t.Fatalf("value span size = %d, value bytes = %d", kv.Value.Meta.Size, len(kv.Value.Data))
+				}
+				assertLeafElementDescriptorSpans(t, element)
+				if kv.Key.Meta.EndOffset() <= len(page.Raw) {
+					got := page.Raw[kv.Key.Meta.StartOffset:kv.Key.Meta.EndOffset()]
+					if string(got) != string(kv.Key.Data) {
+						t.Fatalf("key span bytes = %q, parsed key = %q", got, kv.Key.Data)
+					}
+				}
+				found = true
+				break
+			}
+		}
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+		if found {
+			return
+		}
+	}
+	t.Fatal("fixtures did not contain an ordinary bbolt leaf key/value entry")
+}
+
+func TestInspectLeafPageParsesBucketEntriesFromFixtures(t *testing.T) {
+	t.Parallel()
+
+	inspector, err := Open(fixturePath("single_bucket", "users.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	config := inspector.Config()
+	for id := PageID(0); id < config.HighWaterMark; id++ {
+		page, err := inspector.InspectPage(id)
+		if err != nil {
+			t.Fatalf("InspectPage(%d) returned error: %v", id, err)
+		}
+		if page.LeafPayload == nil {
+			continue
+		}
+
+		for idx, element := range page.LeafPayload.LeafElements {
+			if element.Flags.Value != BucketLeafFlag {
+				continue
+			}
+			if idx >= len(page.LeafPayload.KeyValue) {
+				t.Fatalf("bucket leaf element %d missing key/value payload", idx)
+			}
+			kv := page.LeafPayload.KeyValue[idx]
+			if len(kv.Key.Data) == 0 {
+				t.Fatalf("bucket leaf entry %d on page %d has empty key", idx, id)
+			}
+			if kv.Value.Meta.Size != len(kv.Value.Data) {
+				t.Fatalf("bucket value span size = %d, value bytes = %d", kv.Value.Meta.Size, len(kv.Value.Data))
+			}
+			assertLeafElementDescriptorSpans(t, element)
+			if len(page.LeafPayload.NestedBucket) != 0 {
+				t.Fatal("task 04 should leave bucket values opaque; nested bucket headers belong to task 06")
+			}
+			return
+		}
+	}
+
+	t.Fatal("single_bucket fixture did not contain a bucket leaf entry")
+}
+
+func TestParseLeafPayloadRejectsDescriptorAndPayloadBounds(t *testing.T) {
+	t.Parallel()
+
+	t.Run("descriptor_bounds", func(t *testing.T) {
+		page := make([]byte, 32)
+		_, err := parseLeafPayload(page, 2)
+		if err == nil || !strings.Contains(err.Error(), "leaf descriptor bytes") {
+			t.Fatalf("parseLeafPayload error = %v, want descriptor bounds error", err)
+		}
+	})
+
+	t.Run("key_bounds", func(t *testing.T) {
+		page := make([]byte, 64)
+		binary.LittleEndian.PutUint32(page[20:24], 32)
+		binary.LittleEndian.PutUint32(page[24:28], 20)
+		_, err := parseLeafPayload(page, 1)
+		if err == nil || !strings.Contains(err.Error(), "leaf element 0 key") {
+			t.Fatalf("parseLeafPayload error = %v, want key bounds error", err)
+		}
+	})
+
+	t.Run("value_bounds", func(t *testing.T) {
+		page := make([]byte, 64)
+		binary.LittleEndian.PutUint32(page[20:24], 16)
+		binary.LittleEndian.PutUint32(page[24:28], 1)
+		binary.LittleEndian.PutUint32(page[28:32], 40)
+		copy(page[32:33], []byte("k"))
+		_, err := parseLeafPayload(page, 1)
+		if err == nil || !strings.Contains(err.Error(), "leaf element 0 value") {
+			t.Fatalf("parseLeafPayload error = %v, want value bounds error", err)
+		}
+	})
+}
+
 func TestReadMetaRejectsInvalidMagicUnsupportedVersionAndChecksum(t *testing.T) {
 	t.Parallel()
 
@@ -243,6 +450,44 @@ func TestReadMetaRejectsInvalidMagicUnsupportedVersionAndChecksum(t *testing.T) 
 	}
 }
 
+func writeSyntheticFreelistDB(t *testing.T) string {
+	t.Helper()
+
+	const pageSize = 4096
+	data := make([]byte, pageSize*5)
+	putPageHeader(data[0:pageSize], 0, MetaPageFlag, 0, 0)
+	putMetaPayload(data[0:pageSize], pageSize, 3, 2, 5, 1)
+	putPageHeader(data[2*pageSize:3*pageSize], 2, FreelistPageFlag, 1, 0)
+	binary.LittleEndian.PutUint64(data[2*pageSize+16:2*pageSize+24], 4)
+	putPageHeader(data[4*pageSize:5*pageSize], 4, LeafPageFlag, 0, 0)
+
+	path := filepath.Join(t.TempDir(), "freelist.db")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile synthetic bbolt db: %v", err)
+	}
+	return path
+}
+
+func putPageHeader(page []byte, id PageID, flag FlagType, count uint16, overflow uint32) {
+	binary.LittleEndian.PutUint64(page[0:8], uint64(id))
+	binary.LittleEndian.PutUint16(page[8:10], uint16(flag))
+	binary.LittleEndian.PutUint16(page[10:12], count)
+	binary.LittleEndian.PutUint32(page[12:16], overflow)
+}
+
+func putMetaPayload(page []byte, pageSize int, root PageID, freelist PageID, highWaterMark PageID, txid uint64) {
+	binary.LittleEndian.PutUint32(page[16:20], Magic)
+	binary.LittleEndian.PutUint32(page[20:24], Version)
+	binary.LittleEndian.PutUint32(page[24:28], uint32(pageSize))
+	binary.LittleEndian.PutUint64(page[32:40], uint64(root))
+	binary.LittleEndian.PutUint64(page[48:56], uint64(freelist))
+	binary.LittleEndian.PutUint64(page[56:64], uint64(highWaterMark))
+	binary.LittleEndian.PutUint64(page[64:72], txid)
+	h := fnv.New64a()
+	_, _ = h.Write(page[16:72])
+	binary.LittleEndian.PutUint64(page[72:80], h.Sum64())
+}
+
 func TestParsePageRejectsUnknownPageFlag(t *testing.T) {
 	t.Parallel()
 
@@ -296,8 +541,12 @@ func TestInspectPageRejectsHighWaterMarkAndTruncatedPages(t *testing.T) {
 	if _, err := inspector.InspectPage(config.HighWaterMark); err == nil {
 		t.Fatal("InspectPage(high water mark) returned nil error")
 	}
-	if _, err := inspector.InspectPage(config.HighWaterMark - 1); err == nil || !strings.Contains(err.Error(), "truncated bbolt page") {
-		t.Fatalf("InspectPage(last truncated page) error = %v, want truncated-page error", err)
+	page, err := inspector.InspectPage(config.HighWaterMark - 1)
+	if err != nil {
+		t.Fatalf("InspectPage(last truncated page) returned error: %v", err)
+	}
+	if page.Classification != PageClassTruncated {
+		t.Fatalf("last page classification = %q, want %q", page.Classification, PageClassTruncated)
 	}
 }
 
@@ -355,4 +604,14 @@ func assertMeta(t *testing.T, got Meta, start int, size int) {
 	if got != want {
 		t.Fatalf("meta = %+v, want %+v", got, want)
 	}
+}
+
+func assertLeafElementDescriptorSpans(t *testing.T, element LeafElement) {
+	t.Helper()
+
+	assertMeta(t, element.Meta, element.Meta.StartOffset, 16)
+	assertMeta(t, element.Flags.Meta, element.Meta.StartOffset, 4)
+	assertMeta(t, element.Pos.Meta, element.Meta.StartOffset+4, 4)
+	assertMeta(t, element.KeySize.Meta, element.Meta.StartOffset+8, 4)
+	assertMeta(t, element.ValueSize.Meta, element.Meta.StartOffset+12, 4)
 }

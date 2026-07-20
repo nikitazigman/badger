@@ -1234,6 +1234,41 @@ func TestDrillSubtypeStylesAreContrasting(t *testing.T) {
 	}
 }
 
+func TestBboltLeafStylesAreContrasting(t *testing.T) {
+	t.Parallel()
+
+	topLevel := map[string]string{
+		"descriptors": fmt.Sprint(blockStyle(pageBlockLeafDescriptors).GetForeground()),
+		"entry":       fmt.Sprint(blockStyle(pageBlockLeafEntry).GetForeground()),
+	}
+	for leftName, left := range topLevel {
+		for rightName, right := range topLevel {
+			if leftName >= rightName {
+				continue
+			}
+			if left == right {
+				t.Fatalf("%s and %s render with the same top-level style %q", leftName, rightName, left)
+			}
+		}
+	}
+
+	drill := map[string]string{
+		"descriptor": fmt.Sprint(drillChildStyle(drillChildLeafDescriptor).GetForeground()),
+		"key":        fmt.Sprint(drillChildStyle(drillChildLeafKey).GetForeground()),
+		"value":      fmt.Sprint(drillChildStyle(drillChildLeafValue).GetForeground()),
+	}
+	for leftName, left := range drill {
+		for rightName, right := range drill {
+			if leftName >= rightName {
+				continue
+			}
+			if left == right {
+				t.Fatalf("%s and %s render with the same drill style %q", leftName, rightName, left)
+			}
+		}
+	}
+}
+
 func TestMetaPayloadBlockStyleIsNotUnknown(t *testing.T) {
 	t.Parallel()
 

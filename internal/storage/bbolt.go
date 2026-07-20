@@ -7,7 +7,16 @@ import (
 	"github.com/nikitazigman/badger/internal/bbolt"
 )
 
-const blockMetaPayload = "meta_payload"
+const (
+	blockMetaPayload     = "meta_payload"
+	blockFreelistPayload = "freelist_payload"
+	blockFreelistID      = "freelist_id"
+	blockLeafDescriptors = "leaf_descriptors"
+	blockLeafEntry       = "leaf_entry"
+	blockLeafDescriptor  = "leaf_descriptor"
+	blockLeafKey         = "leaf_key"
+	blockLeafValue       = "leaf_value"
+)
 
 type bboltDatabase struct {
 	inspector *bbolt.Inspector
@@ -48,7 +57,7 @@ func (db *bboltDatabase) Overview() (*DatabaseOverview, error) {
 			{Label: "Type", Value: "bucket"},
 			{Label: "Name", Value: "root"},
 			{Label: "Root page", Value: strconv.FormatUint(uint64(config.Root), 10)},
-			{Label: "Freelist page", Value: strconv.FormatUint(uint64(config.Freelist), 10)},
+			{Label: "Freelist page", Value: bboltPageIDLabel(config.Freelist)},
 			{Label: "High water mark", Value: strconv.FormatUint(uint64(config.HighWaterMark), 10)},
 		},
 	}
@@ -61,6 +70,7 @@ func (db *bboltDatabase) Overview() (*DatabaseOverview, error) {
 		DatabaseSizeBytes: uint64(config.PageSize) * uint64(config.HighWaterMark),
 		HeaderRows:        bboltHeaderRows(config),
 		BTrees:            []BTreeItem{rootBucket},
+		PageSummaries:     bboltPageSummaries(db.inspector.PageSummaries()),
 	}
 
 	db.btrees = map[BTreeID]BTreeItem{rootBucket.ID: rootBucket}
@@ -97,47 +107,69 @@ func bboltHeaderRows(config bbolt.BboltConfig) []Field {
 		{Label: "Page size", Value: strconv.FormatUint(uint64(config.PageSize), 10)},
 		{Label: "Version", Value: strconv.FormatUint(uint64(config.Version), 10)},
 		{Label: "Root page", Value: strconv.FormatUint(uint64(config.Root), 10)},
-		{Label: "Freelist page", Value: strconv.FormatUint(uint64(config.Freelist), 10)},
+		{Label: "Freelist page", Value: bboltPageIDLabel(config.Freelist)},
 		{Label: "High water mark", Value: strconv.FormatUint(uint64(config.HighWaterMark), 10)},
 		{Label: "Transaction ID", Value: strconv.FormatUint(config.TransactionID, 10)},
 	}
 }
 
+func bboltPageIDLabel(id bbolt.PageID) string {
+	if id == bbolt.PgidNoFreelist {
+		return "none"
+	}
+	return strconv.FormatUint(uint64(id), 10)
+}
+
 func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 	pageSize := len(page.Raw)
-	pageID := page.Header.ID.Value
-	pageFlags := page.Header.Flags.Value
+	pageID := page.ID
 	offset := uint64(pageID) * uint64(pageSize)
 	rows := []Field{
 		{Label: "Page", Value: strconv.FormatUint(uint64(pageID), 10)},
-		{Label: "Type", Value: bboltPageKindLabel(pageFlags)},
+		{Label: "Type", Value: bboltClassificationLabel(page.Classification)},
+		{Label: "Classification", Value: bboltClassificationLabel(page.Classification)},
 		{Label: "Page size", Value: fmt.Sprintf("%d bytes", pageSize)},
 		{Label: "File offset", Value: strconv.FormatUint(offset, 10)},
-		Blank(),
-		Section("HEADER"),
-		{Label: "Header page id", Value: strconv.FormatUint(uint64(page.Header.ID.Value), 10), Span: bboltSpanPtr(page.Header.ID.Meta)},
-		{Label: "Flags", Value: bboltPageFlagLabel(page.Header.Flags.Value), Span: bboltSpanPtr(page.Header.Flags.Meta)},
-		{Label: "Count", Value: strconv.FormatUint(uint64(page.Header.Count.Value), 10), Span: bboltSpanPtr(page.Header.Count.Meta)},
-		{Label: "Overflow", Value: strconv.FormatUint(uint64(page.Header.Overflow.Value), 10), Span: bboltSpanPtr(page.Header.Overflow.Meta)},
 	}
 
-	blocks := []HexBlock{{
-		ID:    "page-header",
-		Kind:  blockPageHeader,
-		Title: "Page Header",
-		Span:  bboltSpanFromMeta(page.Header.Meta),
-		Rows: []Field{
-			{Label: "Page Header", Value: ""},
-			{Label: "Offset", Value: bboltOffsetRange(page.Header.Meta)},
-			{Label: "Size", Value: byteCount(page.Header.Meta.Size)},
+	if page.Classification == bbolt.PageClassFree {
+		rows = append(rows,
+			Field{Label: "Freelist membership", Value: "yes"},
+			Field{Label: "Note", Value: "free page; bytes may contain stale data"},
+		)
+	}
+	if page.Classification == bbolt.PageClassContinuation && page.ContinuationOf != nil {
+		rows = append(rows, Field{Label: "Continuation of", Value: strconv.FormatUint(uint64(*page.ContinuationOf), 10)})
+	}
+
+	blocks := []HexBlock{}
+	if page.HasHeader {
+		rows = append(rows,
 			Blank(),
-			Section("FIELDS"),
-			{Label: "Page id", Value: strconv.FormatUint(uint64(page.Header.ID.Value), 10), Span: bboltSpanPtr(page.Header.ID.Meta)},
-			{Label: "Flags", Value: bboltPageFlagLabel(page.Header.Flags.Value), Span: bboltSpanPtr(page.Header.Flags.Meta)},
-			{Label: "Count", Value: strconv.FormatUint(uint64(page.Header.Count.Value), 10), Span: bboltSpanPtr(page.Header.Count.Meta)},
-			{Label: "Overflow", Value: strconv.FormatUint(uint64(page.Header.Overflow.Value), 10), Span: bboltSpanPtr(page.Header.Overflow.Meta)},
-		},
-	}}
+			Section("HEADER"),
+			Field{Label: "Header page id", Value: strconv.FormatUint(uint64(page.Header.ID.Value), 10), Span: bboltSpanPtr(page.Header.ID.Meta)},
+			Field{Label: "Flags", Value: bboltPageFlagLabel(page.Header.Flags.Value), Span: bboltSpanPtr(page.Header.Flags.Meta)},
+			Field{Label: "Count", Value: strconv.FormatUint(uint64(page.Header.Count.Value), 10), Span: bboltSpanPtr(page.Header.Count.Meta)},
+			Field{Label: "Overflow", Value: strconv.FormatUint(uint64(page.Header.Overflow.Value), 10), Span: bboltSpanPtr(page.Header.Overflow.Meta)},
+		)
+		blocks = append(blocks, HexBlock{
+			ID:    "page-header",
+			Kind:  blockPageHeader,
+			Title: "Page Header",
+			Span:  bboltSpanFromMeta(page.Header.Meta),
+			Rows: []Field{
+				{Label: "Page Header", Value: ""},
+				{Label: "Offset", Value: bboltOffsetRange(page.Header.Meta)},
+				{Label: "Size", Value: byteCount(page.Header.Meta.Size)},
+				Blank(),
+				Section("FIELDS"),
+				{Label: "Page id", Value: strconv.FormatUint(uint64(page.Header.ID.Value), 10), Span: bboltSpanPtr(page.Header.ID.Meta)},
+				{Label: "Flags", Value: bboltPageFlagLabel(page.Header.Flags.Value), Span: bboltSpanPtr(page.Header.Flags.Meta)},
+				{Label: "Count", Value: strconv.FormatUint(uint64(page.Header.Count.Value), 10), Span: bboltSpanPtr(page.Header.Count.Meta)},
+				{Label: "Overflow", Value: strconv.FormatUint(uint64(page.Header.Overflow.Value), 10), Span: bboltSpanPtr(page.Header.Overflow.Meta)},
+			},
+		})
+	}
 
 	if page.MetaPayload != nil {
 		rows = append(rows,
@@ -149,7 +181,7 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 			Field{Label: "Flags", Value: strconv.FormatUint(uint64(page.MetaPayload.Flags.Value), 10), Span: bboltSpanPtr(page.MetaPayload.Flags.Meta)},
 			Field{Label: "Root page", Value: strconv.FormatUint(uint64(page.MetaPayload.Root.Value), 10), Span: bboltSpanPtr(page.MetaPayload.Root.Meta)},
 			Field{Label: "Sequence", Value: strconv.FormatUint(page.MetaPayload.Sequence.Value, 10), Span: bboltSpanPtr(page.MetaPayload.Sequence.Meta)},
-			Field{Label: "Freelist page", Value: strconv.FormatUint(uint64(page.MetaPayload.FreeList.Value), 10), Span: bboltSpanPtr(page.MetaPayload.FreeList.Meta)},
+			Field{Label: "Freelist page", Value: bboltPageIDLabel(page.MetaPayload.FreeList.Value), Span: bboltSpanPtr(page.MetaPayload.FreeList.Meta)},
 			Field{Label: "High water mark", Value: strconv.FormatUint(uint64(page.MetaPayload.PageID.Value), 10), Span: bboltSpanPtr(page.MetaPayload.PageID.Meta)},
 			Field{Label: "Transaction ID", Value: strconv.FormatUint(page.MetaPayload.TransactionID.Value, 10), Span: bboltSpanPtr(page.MetaPayload.TransactionID.Meta)},
 			Field{Label: "Checksum", Value: fmt.Sprintf("0x%x", page.MetaPayload.CheckSum.Value), Span: bboltSpanPtr(page.MetaPayload.CheckSum.Meta)},
@@ -171,12 +203,73 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 				{Label: "Flags", Value: strconv.FormatUint(uint64(page.MetaPayload.Flags.Value), 10), Span: bboltSpanPtr(page.MetaPayload.Flags.Meta)},
 				{Label: "Root page", Value: strconv.FormatUint(uint64(page.MetaPayload.Root.Value), 10), Span: bboltSpanPtr(page.MetaPayload.Root.Meta)},
 				{Label: "Sequence", Value: strconv.FormatUint(page.MetaPayload.Sequence.Value, 10), Span: bboltSpanPtr(page.MetaPayload.Sequence.Meta)},
-				{Label: "Freelist page", Value: strconv.FormatUint(uint64(page.MetaPayload.FreeList.Value), 10), Span: bboltSpanPtr(page.MetaPayload.FreeList.Meta)},
+				{Label: "Freelist page", Value: bboltPageIDLabel(page.MetaPayload.FreeList.Value), Span: bboltSpanPtr(page.MetaPayload.FreeList.Meta)},
 				{Label: "High water mark", Value: strconv.FormatUint(uint64(page.MetaPayload.PageID.Value), 10), Span: bboltSpanPtr(page.MetaPayload.PageID.Meta)},
 				{Label: "Transaction ID", Value: strconv.FormatUint(page.MetaPayload.TransactionID.Value, 10), Span: bboltSpanPtr(page.MetaPayload.TransactionID.Meta)},
 				{Label: "Checksum", Value: fmt.Sprintf("0x%x", page.MetaPayload.CheckSum.Value), Span: bboltSpanPtr(page.MetaPayload.CheckSum.Meta)},
 			},
 		})
+	}
+	if page.FreelistPayload != nil {
+		rows = append(rows,
+			Blank(),
+			Section("FREELIST"),
+			Field{Label: "Free page ids", Value: strconv.Itoa(len(page.FreelistPayload.IDs))},
+		)
+		if page.FreelistPayload.ActualCount != nil {
+			rows = append(rows, Field{Label: "Actual count", Value: strconv.FormatUint(page.FreelistPayload.ActualCount.Value, 10), Span: bboltSpanPtr(page.FreelistPayload.ActualCount.Meta)})
+		}
+		for idx, field := range page.FreelistPayload.IDFields {
+			rows = append(rows, Field{Label: fmt.Sprintf("Free page id %d", idx), Value: strconv.FormatUint(uint64(field.Value), 10), Span: bboltSpanPtr(field.Meta)})
+		}
+
+		children := make([]HexBlock, 0, len(page.FreelistPayload.IDFields))
+		for idx, field := range page.FreelistPayload.IDFields {
+			if field.Meta.EndOffset() > len(page.Raw) {
+				continue
+			}
+			children = append(children, HexBlock{
+				ID:    fmt.Sprintf("freelist-id-%d", idx),
+				Kind:  blockFreelistID,
+				Title: fmt.Sprintf("Freelist ID %d", idx),
+				Span:  bboltSpanFromMeta(field.Meta),
+				Rows: []Field{
+					{Label: fmt.Sprintf("Freelist ID %d", idx), Value: ""},
+					{Label: "Offset", Value: bboltOffsetRange(field.Meta)},
+					{Label: "Size", Value: byteCount(field.Meta.Size)},
+					Blank(),
+					Section("FIELDS"),
+					{Label: "Page id", Value: strconv.FormatUint(uint64(field.Value), 10), Span: bboltSpanPtr(field.Meta)},
+				},
+			})
+		}
+		block := HexBlock{
+			ID:       "freelist-payload",
+			Kind:     blockFreelistPayload,
+			Title:    "Freelist Payload",
+			Span:     bboltSpanFromMeta(page.FreelistPayload.Meta),
+			Children: children,
+			Rows: []Field{
+				{Label: "Freelist Payload", Value: ""},
+				{Label: "Offset", Value: bboltOffsetRange(page.FreelistPayload.Meta)},
+				{Label: "Size", Value: byteCount(page.FreelistPayload.Meta.Size)},
+				Blank(),
+				Section("FIELDS"),
+				{Label: "Free page ids", Value: strconv.Itoa(len(page.FreelistPayload.IDs))},
+			},
+		}
+		if block.Span.End() > len(page.Raw) {
+			block.Span.Size = max(0, len(page.Raw)-block.Span.Start)
+		}
+		if page.FreelistPayload.ActualCount != nil {
+			block.Rows = append(block.Rows, Field{Label: "Actual count", Value: strconv.FormatUint(page.FreelistPayload.ActualCount.Value, 10), Span: bboltSpanPtr(page.FreelistPayload.ActualCount.Meta)})
+		}
+		blocks = append(blocks, block)
+	}
+	if page.LeafPayload != nil {
+		leafRows, leafBlocks := adaptBboltLeafPage(page)
+		rows = append(rows, leafRows...)
+		blocks = append(blocks, leafBlocks...)
 	}
 
 	return &PageInspection{
@@ -184,6 +277,199 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 		Raw:       append([]byte(nil), page.Raw...),
 		Rows:      rows,
 		HexBlocks: blocks,
+	}
+}
+
+func adaptBboltLeafPage(page *bbolt.BTreePage) ([]Field, []HexBlock) {
+	descriptorChildren := make([]HexBlock, 0, len(page.LeafPayload.LeafElements))
+	entryBlocks := make([]HexBlock, 0, len(page.LeafPayload.KeyValue))
+	bucketEntries := 0
+	rows := []Field{
+		Blank(),
+		Section("LEAF"),
+		{Label: "Leaf entries", Value: strconv.Itoa(len(page.LeafPayload.LeafElements))},
+	}
+
+	for idx, element := range page.LeafPayload.LeafElements {
+		if idx >= len(page.LeafPayload.KeyValue) {
+			break
+		}
+		kv := page.LeafPayload.KeyValue[idx]
+		entryType := "key/value"
+		if element.Flags.Value == bbolt.BucketLeafFlag {
+			entryType = "bucket"
+			bucketEntries++
+		}
+
+		rows = append(rows, Field{
+			Label: fmt.Sprintf("Entry %d", idx),
+			Value: fmt.Sprintf("%s key=%s value=%s", entryType, bboltKeyLabel(kv.Key.Data), byteCount(len(kv.Value.Data))),
+			Span:  bboltSpanPtr(element.Meta),
+		})
+
+		descriptorChildren = append(descriptorChildren, bboltLeafDescriptorBlock(idx, element))
+		entryBlocks = append(entryBlocks, bboltLeafEntryBlock(idx, element, kv, entryType))
+	}
+	rows = append(rows, Field{Label: "Bucket entries", Value: strconv.Itoa(bucketEntries)})
+
+	blocks := []HexBlock{{
+		ID:       "leaf-descriptors",
+		Kind:     blockLeafDescriptors,
+		Title:    "Leaf Descriptors",
+		Span:     bboltLeafDescriptorsSpan(page.LeafPayload.LeafElements),
+		Children: descriptorChildren,
+		Rows: []Field{
+			{Label: "Leaf Descriptors", Value: ""},
+			{Label: "Offset", Value: spanRange(bboltLeafDescriptorsSpan(page.LeafPayload.LeafElements))},
+			{Label: "Size", Value: byteCount(bboltLeafDescriptorsSpan(page.LeafPayload.LeafElements).Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Descriptors", Value: strconv.Itoa(len(page.LeafPayload.LeafElements))},
+		},
+	}}
+	blocks = append(blocks, entryBlocks...)
+	return rows, blocks
+}
+
+func bboltLeafEntryBlock(idx int, element bbolt.LeafElement, kv bbolt.KeyValue, entryType string) HexBlock {
+	children := []HexBlock{
+		bboltLeafPayloadBlock(idx, "key", blockLeafKey, kv.Key.Meta, len(kv.Key.Data), bboltKeyLabel(kv.Key.Data)),
+		bboltLeafPayloadBlock(idx, "value", blockLeafValue, kv.Value.Meta, len(kv.Value.Data), byteCount(len(kv.Value.Data))),
+	}
+
+	rows := []Field{
+		{Label: fmt.Sprintf("Leaf Entry %d", idx), Value: ""},
+		{Label: "Type", Value: entryType},
+		{Label: "Offset", Value: bboltOffsetRange(kv.Meta)},
+		{Label: "Size", Value: byteCount(kv.Meta.Size)},
+		Blank(),
+		Section("DESCRIPTOR"),
+		{Label: "Flags", Value: bboltLeafFlagLabel(element.Flags.Value), Span: bboltSpanPtr(element.Flags.Meta)},
+		{Label: "Position", Value: strconv.FormatUint(uint64(element.Pos.Value), 10), Span: bboltSpanPtr(element.Pos.Meta)},
+		{Label: "Key size", Value: byteCount(int(element.KeySize.Value)), Span: bboltSpanPtr(element.KeySize.Meta)},
+		{Label: "Value size", Value: byteCount(int(element.ValueSize.Value)), Span: bboltSpanPtr(element.ValueSize.Meta)},
+		Blank(),
+		Section("PAYLOAD"),
+		{Label: "Key", Value: bboltKeyLabel(kv.Key.Data), Span: bboltSpanPtr(kv.Key.Meta)},
+		{Label: "Value", Value: byteCount(len(kv.Value.Data)), Span: bboltSpanPtr(kv.Value.Meta)},
+	}
+
+	return HexBlock{
+		ID:       fmt.Sprintf("leaf-entry-%d", idx),
+		Kind:     blockLeafEntry,
+		Title:    fmt.Sprintf("Leaf Entry %d", idx),
+		Span:     bboltSpanFromMeta(kv.Meta),
+		Rows:     rows,
+		Children: children,
+	}
+}
+
+func bboltLeafDescriptorBlock(idx int, element bbolt.LeafElement) HexBlock {
+	return HexBlock{
+		ID:    fmt.Sprintf("leaf-entry-%d-descriptor", idx),
+		Kind:  blockLeafDescriptor,
+		Title: fmt.Sprintf("Leaf Entry %d Descriptor", idx),
+		Span:  bboltSpanFromMeta(element.Meta),
+		Rows: []Field{
+			{Label: fmt.Sprintf("Leaf Entry %d Descriptor", idx), Value: ""},
+			{Label: "Offset", Value: bboltOffsetRange(element.Meta)},
+			{Label: "Size", Value: byteCount(element.Meta.Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Flags", Value: bboltLeafFlagLabel(element.Flags.Value), Span: bboltSpanPtr(element.Flags.Meta)},
+			{Label: "Position", Value: strconv.FormatUint(uint64(element.Pos.Value), 10), Span: bboltSpanPtr(element.Pos.Meta)},
+			{Label: "Key size", Value: byteCount(int(element.KeySize.Value)), Span: bboltSpanPtr(element.KeySize.Meta)},
+			{Label: "Value size", Value: byteCount(int(element.ValueSize.Value)), Span: bboltSpanPtr(element.ValueSize.Meta)},
+		},
+	}
+}
+
+func bboltLeafPayloadBlock(idx int, label string, kind string, meta bbolt.Meta, size int, value string) HexBlock {
+	titleLabel := "Key"
+	if label == "value" {
+		titleLabel = "Value"
+	}
+	return HexBlock{
+		ID:    fmt.Sprintf("leaf-entry-%d-%s", idx, label),
+		Kind:  kind,
+		Title: fmt.Sprintf("Leaf Entry %d %s", idx, titleLabel),
+		Span:  bboltSpanFromMeta(meta),
+		Rows: []Field{
+			{Label: fmt.Sprintf("Leaf Entry %d %s", idx, titleLabel), Value: ""},
+			{Label: "Offset", Value: bboltOffsetRange(meta)},
+			{Label: "Size", Value: byteCount(size)},
+			{Label: titleLabel, Value: value},
+		},
+	}
+}
+
+func bboltLeafDescriptorsSpan(elements []bbolt.LeafElement) ByteSpan {
+	if len(elements) == 0 {
+		return ByteSpan{Start: 16, Size: 0}
+	}
+	first := elements[0].Meta
+	last := elements[len(elements)-1].Meta
+	return ByteSpan{Start: first.StartOffset, Size: last.EndOffset() - first.StartOffset}
+}
+
+func bboltKeyLabel(data []byte) string {
+	out := make([]byte, 0, len(data)+2)
+	out = append(out, '"')
+	for _, b := range data {
+		switch b {
+		case '\\':
+			out = append(out, '\\', '\\')
+		case '"':
+			out = append(out, '\\', '"')
+		case '\n':
+			out = append(out, '\\', 'n')
+		case '\r':
+			out = append(out, '\\', 'r')
+		case '\t':
+			out = append(out, '\\', 't')
+		default:
+			if b >= 0x20 && b <= 0x7e {
+				out = append(out, b)
+			} else {
+				out = append(out, fmt.Sprintf("\\x%02x", b)...)
+			}
+		}
+	}
+	out = append(out, '"')
+	return string(out)
+}
+
+func bboltPageSummaries(summaries []bbolt.PageSummary) []PageSummary {
+	out := make([]PageSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		classification := bboltStorageClassification(summary.Classification)
+		out = append(out, PageSummary{
+			Ref:            PageRef{ID: uint64(summary.ID)},
+			Classification: classification,
+			Label:          string(classification),
+		})
+	}
+	return out
+}
+
+func bboltStorageClassification(classification bbolt.PageClassification) PageClassification {
+	switch classification {
+	case bbolt.PageClassMeta:
+		return PageClassMeta
+	case bbolt.PageClassBranch:
+		return PageClassBranch
+	case bbolt.PageClassLeaf:
+		return PageClassLeaf
+	case bbolt.PageClassFreelist:
+		return PageClassFreelist
+	case bbolt.PageClassFree:
+		return PageClassFree
+	case bbolt.PageClassContinuation:
+		return PageClassContinuation
+	case bbolt.PageClassTruncated:
+		return PageClassTruncated
+	default:
+		return PageClassUnknown
 	}
 }
 
@@ -217,4 +503,22 @@ func bboltPageKindLabel(flag bbolt.FlagType) string {
 
 func bboltPageFlagLabel(flag bbolt.FlagType) string {
 	return fmt.Sprintf("%s (0x%x)", bboltPageKindLabel(flag), uint16(flag))
+}
+
+func bboltLeafFlagLabel(flag bbolt.LeafFlagType) string {
+	switch flag {
+	case bbolt.OrdinaryKeyValueFlag:
+		return "key/value (0x0)"
+	case bbolt.BucketLeafFlag:
+		return "bucket (0x1)"
+	default:
+		return fmt.Sprintf("unknown (0x%x)", uint32(flag))
+	}
+}
+
+func bboltClassificationLabel(classification bbolt.PageClassification) string {
+	if classification == "" {
+		return string(PageClassUnknown)
+	}
+	return string(bboltStorageClassification(classification))
 }

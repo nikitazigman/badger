@@ -1,8 +1,13 @@
 package bbolt
 
 type BTreePage struct {
-	Raw    []byte
-	Header PageHeader
+	ID        PageID
+	Raw       []byte
+	Header    PageHeader
+	HasHeader bool
+
+	Classification PageClassification
+	ContinuationOf *PageID
 
 	MetaPayload *MetaPayload
 
@@ -65,6 +70,26 @@ const (
 	FreelistPageFlag FlagType = 0x10
 )
 
+const PgidNoFreelist PageID = 0xffffffffffffffff
+
+type PageClassification string
+
+const (
+	PageClassMeta         PageClassification = "meta"
+	PageClassBranch       PageClassification = "branch"
+	PageClassLeaf         PageClassification = "leaf"
+	PageClassFreelist     PageClassification = "freelist"
+	PageClassFree         PageClassification = "free"
+	PageClassContinuation PageClassification = "continuation"
+	PageClassUnknown      PageClassification = "unknown"
+	PageClassTruncated    PageClassification = "truncated"
+)
+
+type PageSummary struct {
+	ID             PageID
+	Classification PageClassification
+}
+
 type PageHeader struct {
 	Meta     Meta
 	ID       PageIDField
@@ -112,6 +137,7 @@ type KeyValue struct {
 }
 
 type Payload struct {
+	Meta Meta
 	Data []byte
 }
 
@@ -128,21 +154,27 @@ type LeafFlagType uint32
 
 const (
 	OrdinaryKeyValueFlag LeafFlagType = 0x00
-	NestedBucketFlag     LeafFlagType = 0x01
+	BucketLeafFlag       LeafFlagType = 0x01
+	NestedBucketFlag                  = BucketLeafFlag
 )
 
 type LeafElement struct {
 	Meta      Meta
-	Flags     LeafFlagType
-	Pos       uint32
-	KeySize   uint32
-	ValueSize uint32
+	Flags     LeafFlagField
+	Pos       Uint32Field
+	KeySize   Uint32Field
+	ValueSize Uint32Field
+}
+
+type LeafFlagField struct {
+	Meta  Meta
+	Value LeafFlagType
 }
 
 type NestedBucket struct {
 	Meta     Meta
-	Root     PageID // 0 for inline bucket
-	Sequence uint64
+	Root     PageIDField // 0 for inline bucket
+	Sequence Uint64Field
 }
 
 type InlineBucket struct {
@@ -153,7 +185,8 @@ type InlineBucket struct {
 }
 
 type FreelistPayload struct {
-	Meta         Meta
-	actual_count *uint64
-	IDs          []PageID
+	Meta        Meta
+	ActualCount *Uint64Field
+	IDFields    []PageIDField
+	IDs         []PageID
 }

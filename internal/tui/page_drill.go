@@ -25,6 +25,10 @@ const (
 	drillChildSerialType       = "serial_type"
 	drillChildRecordValue      = "record_value"
 	drillChildOverflowPointer  = "overflow_pointer"
+	drillChildLeafEntry        = "leaf_entry"
+	drillChildLeafDescriptor   = "leaf_descriptor"
+	drillChildLeafKey          = "leaf_key"
+	drillChildLeafValue        = "leaf_value"
 )
 
 type drillChild struct {
