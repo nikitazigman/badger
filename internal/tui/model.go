@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/nikitazigman/badger/internal/sqlite"
+	"github.com/nikitazigman/badger/internal/storage"
 )
 
 const loadingIndicatorDelay = 500 * time.Millisecond
@@ -35,15 +35,15 @@ type navItem struct {
 	kind       navKind
 	title      string
 	subtitle   string
-	pageNumber uint32
+	pageNumber uint64
 	schema     *schemaObjectViewModel
 }
 
 type loadingDelayElapsedMsg struct {
-	pageNumber uint32
+	pageNumber uint64
 }
 
-func showLoadingAfterDelayCmd(pageNumber uint32) tea.Cmd {
+func showLoadingAfterDelayCmd(pageNumber uint64) tea.Cmd {
 	return tea.Tick(loadingIndicatorDelay, func(time.Time) tea.Msg {
 		return loadingDelayElapsedMsg{pageNumber: pageNumber}
 	})
@@ -51,7 +51,7 @@ func showLoadingAfterDelayCmd(pageNumber uint32) tea.Cmd {
 
 type contentTarget struct {
 	kind       navKind
-	pageNumber uint32
+	pageNumber uint64
 	schemaName string
 }
 
@@ -63,20 +63,19 @@ const (
 )
 
 // filterSource identifies the single object PAGES is scoped to. It stores the object
-// only; the page set and skip diagnostics are derived from pageIndex on demand (the DB is
-// read-only and the index is immutable once built, so there is nothing to snapshot).
+// only; the page set is derived from pageIndex on demand.
 type filterSource struct {
 	object schemaObjectViewModel // Type → icon, Name, RootPage (0 for virtual tables / views)
 }
 
 type model struct {
-	inspector       *sqlite.Inspector
+	database        storage.Database
 	db              databaseViewModel
 	navItems        []navItem
 	selectedIndex   int
 	inspectorScroll int
 	active          contentTarget
-	currentPage     *sqlite.PageInspection
+	currentPage     *storage.PageInspection
 	focusedPane     pane
 	selectedBlock   int
 	blockSelected   bool
@@ -89,16 +88,16 @@ type model struct {
 	loading         bool
 	loadingVisible  bool
 	err             error
-	pageIndex       sqlite.PageIndex  // root → PageWalk (ready entries only)
-	indexRoots      []uint32          // unique, non-zero roots dispatched at launch
-	indexErrors     map[uint32]string // root → hard-failure reason (transient; NOT serialized)
-	indexPending    int               // roots still being walked (indexTotal → 0)
-	indexTotal      int               // total roots dispatched
-	activeFilter    *filterSource     // nil = unfiltered
+	pageIndex       map[storage.BTreeID][]storage.PageRef // b-tree id -> ready pages
+	indexRoots      []storage.BTreeID                     // unique, root-backed ids dispatched at launch
+	indexErrors     map[storage.BTreeID]string            // b-tree id -> hard-failure reason
+	indexPending    int
+	indexTotal      int
+	activeFilter    *filterSource // nil = unfiltered
 }
 
-func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) (model, error) {
-	db, err := newDatabaseViewModel(metadata)
+func newModel(database storage.Database, overview *storage.DatabaseOverview) (model, error) {
+	db, err := newDatabaseViewModel(overview)
 	if err != nil {
 		return model{}, err
 	}
@@ -107,7 +106,7 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 	navItems := buildNavItems(db, nil, nil)
 
 	return model{
-		inspector:     inspector,
+		database:      database,
 		db:            db,
 		navItems:      navItems,
 		active:        initialContentTarget(navItems),
@@ -116,9 +115,9 @@ func newModel(inspector *sqlite.Inspector, metadata *sqlite.MetadataInspection) 
 		height:        34,
 		status:        "",
 		selectedIndex: 0,
-		pageIndex:     sqlite.NewPageIndex(),
+		pageIndex:     map[storage.BTreeID][]storage.PageRef{},
 		indexRoots:    indexRoots,
-		indexErrors:   map[uint32]string{},
+		indexErrors:   map[storage.BTreeID]string{},
 		indexPending:  len(indexRoots),
 		indexTotal:    len(indexRoots),
 	}, nil
@@ -132,10 +131,10 @@ func (m *model) applyFilter(obj schemaObjectViewModel) {
 	switch {
 	case obj.RootPage == 0: // virtual table / view: no b-tree, valid empty filter
 		m.setFilter(obj)
-	case m.walkPresent(obj.RootPage):
+	case m.walkPresent(obj.ID):
 		m.setFilter(obj)
-	case m.hasIndexError(obj.RootPage):
-		m.status = "⚠ can't filter " + objectIcon(obj) + " " + obj.Name + ": " + m.indexErrors[obj.RootPage]
+	case m.hasIndexError(obj.ID):
+		m.status = "⚠ can't filter " + objectIcon(obj) + " " + obj.Name + ": " + m.indexErrors[obj.ID]
 	default:
 		m.status = "still indexing " + objectIcon(obj) + " " + obj.Name + "… try again in a moment"
 	}
@@ -168,24 +167,24 @@ func (m model) isFiltered() bool { return m.activeFilter != nil }
 
 // filteredPages returns (pages, true) when a filter is active (an empty slice for a
 // virtual table), else (nil, false). The bool means "filter active", NOT "has pages".
-func (m model) filteredPages() ([]uint32, bool) {
+func (m model) filteredPages() ([]storage.PageRef, bool) {
 	if m.activeFilter == nil {
 		return nil, false
 	}
 	root := m.activeFilter.object.RootPage
 	if root == 0 {
-		return []uint32{}, true
+		return []storage.PageRef{}, true
 	}
-	return m.pageIndex.Pages(root), true
+	return append([]storage.PageRef(nil), m.pageIndex[m.activeFilter.object.ID]...), true
 }
 
-func (m model) walkPresent(root uint32) bool {
-	_, ok := m.pageIndex.Walk(root)
+func (m model) walkPresent(id storage.BTreeID) bool {
+	_, ok := m.pageIndex[id]
 	return ok
 }
 
-func (m model) hasIndexError(root uint32) bool {
-	_, ok := m.indexErrors[root]
+func (m model) hasIndexError(id storage.BTreeID) bool {
+	_, ok := m.indexErrors[id]
 	return ok
 }
 
@@ -212,8 +211,8 @@ func (m model) Init() tea.Cmd {
 		return nil
 	}
 	cmds := make([]tea.Cmd, 0, len(m.indexRoots))
-	for _, root := range m.indexRoots {
-		cmds = append(cmds, indexBTreeCmd(m.inspector, root))
+	for _, id := range m.indexRoots {
+		cmds = append(cmds, indexBTreeCmd(m.database, id))
 	}
 	return tea.Batch(cmds...)
 }
@@ -227,7 +226,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case pageLoadedMsg:
-		if msg.page == nil || m.active.kind != navPage || msg.page.PageNumber != m.active.pageNumber {
+		if msg.page == nil || m.active.kind != navPage || msg.page.Ref.ID != m.active.pageNumber {
 			return m, nil
 		}
 		m.currentPage = msg.page
@@ -251,9 +250,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.indexPending--
 		}
 		if msg.err != nil {
-			m.indexErrors[msg.root] = msg.err.Error()
+			m.indexErrors[msg.id] = msg.err.Error()
 		} else {
-			m.pageIndex.Set(msg.walk)
+			m.pageIndex[msg.id] = append([]storage.PageRef(nil), msg.pages...)
 		}
 		// Transient status only; the polished footer token is Ticket 06.
 		if m.indexPending == 0 {
@@ -686,7 +685,7 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 		m.loadingVisible = false
 		m.status = ""
 		return m, tea.Batch(
-			loadPageCmd(m.inspector, item.pageNumber),
+			loadPageCmd(m.database, item.pageNumber),
 			showLoadingAfterDelayCmd(item.pageNumber),
 		)
 	default:
@@ -844,24 +843,16 @@ func insetLine(line string, left int, width int) string {
 	return strings.Repeat(" ", left) + lipgloss.PlaceHorizontal(width, lipgloss.Left, truncateCells(line, width))
 }
 
-// filterToken renders the active-filter indicator: the source icon + name, page count, and
-// a degraded-walk tail (· k skipped + ⚠ page N unreadable) when some pages could not be
-// read (design §4.6 / §4.7). The retry / hard-failure statuses are NOT shown here — they
-// only occur while unfiltered, where the transient status segment surfaces them.
+// filterToken renders the active-filter indicator: the source icon + name and page count.
+// Hard-failure statuses are only shown while unfiltered, where the transient status
+// segment surfaces them.
 func (m model) filterToken() string {
 	obj := m.activeFilter.object
 	pages, _ := m.filteredPages()
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "⦿ filtered: %s %s (%d pg", objectIcon(obj), obj.Name, len(pages))
-	walk, ok := m.pageIndex.Walk(obj.RootPage)
-	if ok && len(walk.Skipped) > 0 {
-		fmt.Fprintf(&b, " · %d skipped", len(walk.Skipped))
-	}
 	b.WriteString(")")
-	if ok && len(walk.Skipped) > 0 {
-		fmt.Fprintf(&b, " | ⚠ page %d unreadable", walk.Skipped[0].Page)
-	}
 	return b.String()
 }
 
@@ -1222,7 +1213,7 @@ func (m model) viewPage(width int, height int) []string {
 		}
 	}
 
-	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+	if m.currentPage == nil || m.currentPage.Ref.ID != pageNumber {
 		return wrapLines([]string{"Waiting for page bytes..."}, width)
 	}
 
@@ -1260,8 +1251,8 @@ func (m model) viewInspector(width int, height int) string {
 			"",
 			sectionStyle.Render("DETAIL"),
 			"100-byte SQLite database header",
-			fmt.Sprintf("Schema cookie: %d", m.db.DBHeader.SchemaCookie),
-			fmt.Sprintf("Schema format: %d", m.db.DBHeader.SchemaFormat),
+			"Schema cookie: "+fieldValue(m.db.HeaderRows, "Schema cookie"),
+			"Schema format: "+fieldValue(m.db.HeaderRows, "Schema format"),
 			fmt.Sprintf("SQLite version: %s", m.db.SQLiteVersionLabel),
 		)
 	case navTable, navIndex:
@@ -1303,13 +1294,8 @@ func (m model) viewInspector(width int, height int) string {
 		if item.pageNumber == 1 {
 			lines = append(lines, "Bytes 0-99: SQLite database header before b-tree content")
 		}
-		if m.currentPage != nil && m.currentPage.PageNumber == item.pageNumber {
-			header := m.currentPage.BTreePage.PageHeader
-			lines = append(lines,
-				fmt.Sprintf("Page kind: %s", pageKindLabel(header.PageKind.Value)),
-				fmt.Sprintf("Header bytes: %d..%d", header.Meta.StartOffset, header.Meta.EndOffset()),
-				fmt.Sprintf("Cell pointers: %d", len(m.currentPage.BTreePage.CellPointerArray.Pointers)),
-			)
+		if m.currentPage != nil && m.currentPage.Ref.ID == item.pageNumber {
+			lines = append(lines, pageSummaryLines(m.currentPage)...)
 		}
 		lines = append(lines,
 			"",
@@ -1329,7 +1315,7 @@ func (m model) viewPageMeta() string {
 	pageNumber := m.inspectorPageNumber()
 	lines := []string{}
 
-	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+	if m.currentPage == nil || m.currentPage.Ref.ID != pageNumber {
 		if m.loadingVisible {
 			lines = append(lines, "Page metadata is loading.")
 		} else {
@@ -1346,28 +1332,7 @@ func (m model) viewPageMeta() string {
 		return strings.Join(blockMetaLines(block, page), "\n")
 	}
 
-	header := page.BTreePage.PageHeader
-	pointerBytes := len(page.BTreePage.CellPointerArray.Pointers) * 2
-	unallocatedBytes := 0
-	for _, region := range page.BTreePage.UnallocatedRegions {
-		unallocatedBytes += region.Meta.Size
-	}
-
-	lines = append(lines,
-		fmt.Sprintf("Page %d", page.PageNumber),
-		fmt.Sprintf("Type: %s", pageKindLabel(header.PageKind.Value)),
-		fmt.Sprintf("Page size: %d bytes", len(page.BTreePage.Raw)),
-		fmt.Sprintf("File offset: %d", (page.PageNumber-1)*m.db.PageSize),
-		"",
-		sectionStyle.Render("STRUCTURE"),
-		fmt.Sprintf("Cells: %d", header.CellCount.Value),
-		fmt.Sprintf("Cell content start: %d", header.CellContentAreaOffset.Value),
-		fmt.Sprintf("First freeblock: %d", header.FirstFreeblock.Value),
-		fmt.Sprintf("Fragmented free bytes: %d", header.FragmentedFreeBytes.Value),
-		fmt.Sprintf("Pointer array: %d bytes", pointerBytes),
-		fmt.Sprintf("Freeblocks: %d", len(page.BTreePage.Freeblocks)),
-		fmt.Sprintf("Unallocated: %d bytes", unallocatedBytes),
-	)
+	lines = append(lines, pageRows(page.Rows)...)
 
 	if m.activeFilter != nil {
 		lines = append(lines,
@@ -1381,18 +1346,56 @@ func (m model) viewPageMeta() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m model) inspectorPageNumber() uint32 {
+func pageRows(rows []storage.Field) []string {
+	lines := make([]string, 0, len(rows))
+	for _, line := range fieldLines(rows) {
+		if line == "Page: "+fieldValue(rows, "Page") {
+			lines = append(lines, "Page "+fieldValue(rows, "Page"))
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func pageSummaryLines(page *storage.PageInspection) []string {
+	if page == nil {
+		return nil
+	}
+	lines := []string{}
+	if value := fieldValue(page.Rows, "Type"); value != "" {
+		lines = append(lines, "Page kind: "+value)
+	}
+	if block := firstHexBlockByKind(page.HexBlocks, pageBlockPageHeader); block != nil {
+		lines = append(lines, fmt.Sprintf("Header bytes: %d..%d", block.Span.Start, block.Span.End()))
+	}
+	if value := fieldValue(page.Rows, "Pointer array"); value != "" {
+		lines = append(lines, "Pointer array: "+value)
+	}
+	return lines
+}
+
+func firstHexBlockByKind(blocks []storage.HexBlock, kind string) *storage.HexBlock {
+	for idx := range blocks {
+		if blocks[idx].Kind == kind {
+			return &blocks[idx]
+		}
+	}
+	return nil
+}
+
+func (m model) inspectorPageNumber() uint64 {
 	item := m.selectedItem()
 	pageNumber := item.pageNumber
 	if m.loading && !m.loadingVisible && m.currentPage != nil {
-		pageNumber = m.currentPage.PageNumber
+		pageNumber = m.currentPage.Ref.ID
 	}
 	return pageNumber
 }
 
 func (m model) currentPageBlocks() []pageBlock {
 	pageNumber := m.inspectorPageNumber()
-	if m.currentPage == nil || m.currentPage.PageNumber != pageNumber {
+	if m.currentPage == nil || m.currentPage.Ref.ID != pageNumber {
 		return nil
 	}
 	return buildPageBlocks(m.currentPage)
@@ -1506,7 +1509,7 @@ func (m model) renderHexRows(width int, height int) []string {
 	if m.currentPage == nil {
 		return []string{"No page bytes."}
 	}
-	raw := m.currentPage.BTreePage.Raw
+	raw := m.currentPage.Raw
 	if len(raw) == 0 {
 		return []string{"No page bytes."}
 	}
@@ -1530,18 +1533,18 @@ func (m model) renderHexRows(width int, height int) []string {
 	return lines
 }
 
-func (m model) selectedHexMeta(blocks []pageBlock) (sqlite.Meta, bool) {
+func (m model) selectedHexMeta(blocks []pageBlock) (storage.ByteSpan, bool) {
 	if child, ok := m.selectedDrillChild(); ok {
 		return child.meta, true
 	}
 	if m.blockSelected && m.selectedBlock >= 0 && m.selectedBlock < len(blocks) {
 		return blocks[m.selectedBlock].meta, true
 	}
-	return sqlite.Meta{}, false
+	return storage.ByteSpan{}, false
 }
 
 func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) string {
-	selectedMeta := sqlite.Meta{}
+	selectedMeta := storage.ByteSpan{}
 	hasSelectedMeta := false
 	if selected >= 0 && selected < len(blocks) {
 		selectedMeta = blocks[selected].meta
@@ -1550,7 +1553,7 @@ func formatHexRow(offset int, chunk []byte, blocks []pageBlock, selected int) st
 	return formatHexRowWithSelection(offset, chunk, blocks, selectedMeta, hasSelectedMeta, nil)
 }
 
-func formatHexRowWithSelection(offset int, chunk []byte, blocks []pageBlock, selectedMeta sqlite.Meta, hasSelectedMeta bool, drillChildren []drillChild) string {
+func formatHexRowWithSelection(offset int, chunk []byte, blocks []pageBlock, selectedMeta storage.ByteSpan, hasSelectedMeta bool, drillChildren []drillChild) string {
 	var b strings.Builder
 	b.WriteString(hexOffsetStyle.Render(fmt.Sprintf("%04X     ", offset)))
 	for idx := 0; idx < 16; idx++ {
@@ -1572,17 +1575,17 @@ func formatHexRowWithSelection(offset int, chunk []byte, blocks []pageBlock, sel
 	return b.String()
 }
 
-func styleHexByte(token string, offset int, blocks []pageBlock, selectedMeta sqlite.Meta, hasSelectedMeta bool, drillChildren []drillChild) string {
-	if hasSelectedMeta && offset >= selectedMeta.StartOffset && offset < selectedMeta.EndOffset() {
+func styleHexByte(token string, offset int, blocks []pageBlock, selectedMeta storage.ByteSpan, hasSelectedMeta bool, drillChildren []drillChild) string {
+	if hasSelectedMeta && offset >= selectedMeta.Start && offset < selectedMeta.End() {
 		return selectedHexByteStyle.Render(token)
 	}
 	for _, child := range drillChildren {
-		if offset >= child.meta.StartOffset && offset < child.meta.EndOffset() {
+		if offset >= child.meta.Start && offset < child.meta.End() {
 			return drillChildStyle(child.kind).Render(token)
 		}
 	}
 	for _, block := range blocks {
-		if offset < block.meta.StartOffset || offset >= block.meta.EndOffset() {
+		if offset < block.meta.Start || offset >= block.meta.End() {
 			continue
 		}
 		return blockStyle(block.kind).Render(token)
@@ -1631,7 +1634,7 @@ var (
 	scrollbarThumbStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 )
 
-func drillChildStyle(kind drillChildKind) lipgloss.Style {
+func drillChildStyle(kind string) lipgloss.Style {
 	switch kind {
 	case drillChildPayloadSize:
 		return payloadSizeHexByteStyle
@@ -1654,7 +1657,7 @@ func drillChildStyle(kind drillChildKind) lipgloss.Style {
 	}
 }
 
-func blockStyle(kind pageBlockKind) lipgloss.Style {
+func blockStyle(kind string) lipgloss.Style {
 	switch kind {
 	case pageBlockDatabaseHeader:
 		return dbHeaderHexByteStyle
@@ -1677,7 +1680,7 @@ func blockStyle(kind pageBlockKind) lipgloss.Style {
 // The PAGES section lists filteredPages when filter != nil (an empty list for a virtual
 // table) and the full 1..PageCount otherwise. The root page is intentionally not shown on
 // B-TREES rows (it lives in the detail / summary panes — design §2).
-func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []uint32) []navItem {
+func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []storage.PageRef) []navItem {
 	items := []navItem{}
 
 	for _, table := range db.Tables {
@@ -1699,15 +1702,15 @@ func buildNavItems(db databaseViewModel, filter *filterSource, filteredPages []u
 	}
 
 	if filter != nil {
-		for _, pageNumber := range filteredPages {
+		for _, page := range filteredPages {
 			items = append(items, navItem{
 				kind:       navPage,
-				title:      fmt.Sprintf("page %d", pageNumber),
-				pageNumber: pageNumber,
+				title:      fmt.Sprintf("page %d", page.ID),
+				pageNumber: page.ID,
 			})
 		}
 	} else {
-		for pageNumber := uint32(1); pageNumber <= db.PageCount; pageNumber++ {
+		for pageNumber := db.FirstPageID; pageNumber < db.FirstPageID+db.PageCount; pageNumber++ {
 			items = append(items, navItem{
 				kind:       navPage,
 				title:      fmt.Sprintf("page %d", pageNumber),
@@ -1765,17 +1768,17 @@ func indexOfBTreeRow(items []navItem, obj schemaObjectViewModel) int {
 // collectBTreeRoots returns the unique, non-zero b-tree root pages across the database's
 // tables and indexes. A root belongs to exactly one object, but it dedupes defensively;
 // RootPage == 0 (views / virtual tables, which have no b-tree) is skipped.
-func collectBTreeRoots(db databaseViewModel) []uint32 {
-	seen := make(map[uint32]bool)
-	roots := make([]uint32, 0, len(db.Tables)+len(db.Indexes))
+func collectBTreeRoots(db databaseViewModel) []storage.BTreeID {
+	seen := make(map[storage.BTreeID]bool)
+	roots := make([]storage.BTreeID, 0, len(db.Tables)+len(db.Indexes))
 
 	collect := func(objects []schemaObjectViewModel) {
 		for _, obj := range objects {
-			if obj.RootPage == 0 || seen[obj.RootPage] {
+			if obj.RootPage == 0 || obj.ID == "" || seen[obj.ID] {
 				continue
 			}
-			seen[obj.RootPage] = true
-			roots = append(roots, obj.RootPage)
+			seen[obj.ID] = true
+			roots = append(roots, obj.ID)
 		}
 	}
 
@@ -1878,21 +1881,6 @@ func appendInspectorLine(out []string, line string, width int) []string {
 
 func mutedInline(text string) string {
 	return mutedStyle.Render(text)
-}
-
-func pageKindLabel(kind sqlite.PageKindType) string {
-	switch kind {
-	case sqlite.InteriorIndexBTreePage:
-		return "interior index"
-	case sqlite.InteriorTableBTreePage:
-		return "interior table"
-	case sqlite.LeafIndexBTreePage:
-		return "leaf index"
-	case sqlite.LeafTableBTreePage:
-		return "leaf table"
-	default:
-		return fmt.Sprintf("0x%02x", kind)
-	}
 }
 
 func clamp(value int, minValue int, maxValue int) int {

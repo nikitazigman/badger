@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/nikitazigman/badger/internal/sqlite"
+	"github.com/nikitazigman/badger/internal/storage"
 )
 
 // firstIndexOfKind returns the navItems index of the first row of the given kind, or -1.
@@ -100,10 +100,10 @@ func TestSectionJumpsAutoActivate(t *testing.T) {
 	if loaded.status != "" {
 		t.Fatalf("fast page load changed footer status to %q", loaded.status)
 	}
-	if loaded.currentPage == nil || loaded.currentPage.PageNumber != got.active.pageNumber {
+	if loaded.currentPage == nil || loaded.currentPage.Ref.ID != got.active.pageNumber {
 		t.Fatalf("loaded current page = %+v, want page %d", loaded.currentPage, got.active.pageNumber)
 	}
-	if len(loaded.currentPage.BTreePage.Raw) == 0 {
+	if len(loaded.currentPage.Raw) == 0 {
 		t.Fatal("loaded page has no raw bytes")
 	}
 
@@ -534,7 +534,7 @@ func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
 	if loaded.currentPage == nil {
 		t.Fatal("setup: first page did not load")
 	}
-	firstPage := loaded.currentPage.PageNumber
+	firstPage := loaded.currentPage.Ref.ID
 
 	next, cmd = loaded.Update(tea.KeyMsg{Type: tea.KeyDown})
 	scrolling := next.(model)
@@ -547,7 +547,7 @@ func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
 	if scrolling.loadingVisible {
 		t.Fatal("loading indicator is visible before the delay")
 	}
-	if scrolling.currentPage == nil || scrolling.currentPage.PageNumber != firstPage {
+	if scrolling.currentPage == nil || scrolling.currentPage.Ref.ID != firstPage {
 		t.Fatalf("currentPage = %+v, want previous page %d preserved during delay", scrolling.currentPage, firstPage)
 	}
 
@@ -682,14 +682,14 @@ func TestPageBlocksArePhysicalOrder(t *testing.T) {
 	if len(blocks) < 4 {
 		t.Fatalf("loaded page has %d blocks, want at least database header, page header, pointer array, and data", len(blocks))
 	}
-	if blocks[0].kind != pageBlockDatabaseHeader || blocks[0].meta.StartOffset != 0 || blocks[0].meta.Size != 100 {
+	if blocks[0].kind != pageBlockDatabaseHeader || blocks[0].meta.Start != 0 || blocks[0].meta.Size != 100 {
 		t.Fatalf("first block = %+v, want 100-byte database header at offset 0", blocks[0])
 	}
-	if blocks[1].kind != pageBlockPageHeader || blocks[1].meta.StartOffset != 100 {
+	if blocks[1].kind != pageBlockPageHeader || blocks[1].meta.Start != 100 {
 		t.Fatalf("second block = %+v, want page header at offset 100", blocks[1])
 	}
 	for idx := 1; idx < len(blocks); idx++ {
-		if blocks[idx].meta.StartOffset < blocks[idx-1].meta.StartOffset {
+		if blocks[idx].meta.Start < blocks[idx-1].meta.Start {
 			t.Fatalf("blocks are not sorted physically at %d: prev=%+v current=%+v", idx, blocks[idx-1], blocks[idx])
 		}
 	}
@@ -969,13 +969,13 @@ func TestCellDrillToggleMovementAndMeta(t *testing.T) {
 	}
 
 	second := children[1]
-	rowOffset := (second.meta.StartOffset / 16) * 16
+	rowOffset := (second.meta.Start / 16) * 16
 	rowEnd := rowOffset + 16
-	if rowEnd > len(drilled.currentPage.BTreePage.Raw) {
-		rowEnd = len(drilled.currentPage.BTreePage.Raw)
+	if rowEnd > len(drilled.currentPage.Raw) {
+		rowEnd = len(drilled.currentPage.Raw)
 	}
-	rendered := formatHexRowWithSelection(rowOffset, drilled.currentPage.BTreePage.Raw[rowOffset:rowEnd], drilled.currentPageBlocks(), first.meta, true, drilled.currentDrillChildren())
-	wantSiblingByte := drillChildStyle(second.kind).Render(fmt.Sprintf("%02X", drilled.currentPage.BTreePage.Raw[second.meta.StartOffset]))
+	rendered := formatHexRowWithSelection(rowOffset, drilled.currentPage.Raw[rowOffset:rowEnd], drilled.currentPageBlocks(), first.meta, true, drilled.currentDrillChildren())
+	wantSiblingByte := drillChildStyle(second.kind).Render(fmt.Sprintf("%02X", drilled.currentPage.Raw[second.meta.Start]))
 	if !strings.Contains(rendered, wantSiblingByte) {
 		t.Fatalf("unselected drill sibling byte did not use drill child style:\n%s", rendered)
 	}
@@ -1024,13 +1024,13 @@ func TestCellDrillToggleMovementAndMeta(t *testing.T) {
 		t.Fatalf("nested drill meta missing payload parent:\n%s", meta)
 	}
 
-	rowOffset = (nestedChild.meta.StartOffset / 16) * 16
+	rowOffset = (nestedChild.meta.Start / 16) * 16
 	rowEnd = rowOffset + 16
-	if rowEnd > len(nested.currentPage.BTreePage.Raw) {
-		rowEnd = len(nested.currentPage.BTreePage.Raw)
+	if rowEnd > len(nested.currentPage.Raw) {
+		rowEnd = len(nested.currentPage.Raw)
 	}
-	rendered = formatHexRowWithSelection(rowOffset, nested.currentPage.BTreePage.Raw[rowOffset:rowEnd], nested.currentPageBlocks(), nestedChild.meta, true, nested.currentDrillChildren())
-	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", nested.currentPage.BTreePage.Raw[nestedChild.meta.StartOffset]))
+	rendered = formatHexRowWithSelection(rowOffset, nested.currentPage.Raw[rowOffset:rowEnd], nested.currentPageBlocks(), nestedChild.meta, true, nested.currentDrillChildren())
+	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", nested.currentPage.Raw[nestedChild.meta.Start]))
 	if !strings.Contains(rendered, wantByte) {
 		t.Fatalf("selected nested drill child byte did not use selected style:\n%s", rendered)
 	}
@@ -1261,22 +1261,22 @@ func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 	if hex.selectedBlock != len(blocks)-1 {
 		t.Fatalf("selected block %d, want last block %d", hex.selectedBlock, len(blocks)-1)
 	}
-	if last.meta.StartOffset >= 16 && hex.hexScroll == 0 {
+	if last.meta.Start >= 16 && hex.hexScroll == 0 {
 		t.Fatal("selecting a later block did not advance hexScroll")
 	}
 
 	view := hex.viewExplorer(80, 4)
-	rowOffset := (last.meta.StartOffset / 16) * 16
+	rowOffset := (last.meta.Start / 16) * 16
 	if !strings.Contains(view, fmt.Sprintf("%04X", rowOffset)) {
-		t.Fatalf("hex viewport did not reveal selected block starting at %d:\n%s", last.meta.StartOffset, view)
+		t.Fatalf("hex viewport did not reveal selected block starting at %d:\n%s", last.meta.Start, view)
 	}
 
 	rowEnd := rowOffset + 16
-	if rowEnd > len(hex.currentPage.BTreePage.Raw) {
-		rowEnd = len(hex.currentPage.BTreePage.Raw)
+	if rowEnd > len(hex.currentPage.Raw) {
+		rowEnd = len(hex.currentPage.Raw)
 	}
-	rendered := formatHexRow(rowOffset, hex.currentPage.BTreePage.Raw[rowOffset:rowEnd], blocks, hex.selectedBlock)
-	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", hex.currentPage.BTreePage.Raw[last.meta.StartOffset]))
+	rendered := formatHexRow(rowOffset, hex.currentPage.Raw[rowOffset:rowEnd], blocks, hex.selectedBlock)
+	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", hex.currentPage.Raw[last.meta.Start]))
 	if !strings.Contains(rendered, wantByte) {
 		t.Fatalf("selected block byte did not use selected style:\n%s", rendered)
 	}
@@ -1347,7 +1347,7 @@ func TestStalePageLoadedMessageIgnored(t *testing.T) {
 	m.loading = true
 	m.status = "loading page 2"
 
-	next, cmd := m.Update(pageLoadedMsg{page: &sqlite.PageInspection{PageNumber: 1}})
+	next, cmd := m.Update(pageLoadedMsg{page: &storage.PageInspection{Ref: storage.PageRef{ID: 1}}})
 	got := next.(model)
 	if cmd != nil {
 		t.Fatal("stale pageLoadedMsg returned a command")
@@ -1454,8 +1454,8 @@ func TestTruncateCellsPreservesANSISequences(t *testing.T) {
 	row := formatHexRowWithSelection(
 		0,
 		[]byte{0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00},
-		[]pageBlock{{kind: pageBlockDatabaseHeader, meta: sqlite.Meta{StartOffset: 0, Size: 100}}},
-		sqlite.Meta{StartOffset: 0, Size: 1},
+		[]pageBlock{{kind: pageBlockDatabaseHeader, meta: storage.ByteSpan{Start: 0, Size: 100}}},
+		storage.ByteSpan{Start: 0, Size: 1},
 		true,
 		nil,
 	)

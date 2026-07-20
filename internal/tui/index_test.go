@@ -6,48 +6,48 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/nikitazigman/badger/internal/sqlite"
+	"github.com/nikitazigman/badger/internal/storage"
 )
 
 func fixturePath(name string) string {
 	return filepath.Join("..", "..", "fixtures", name)
 }
 
-func newFixtureModel(t *testing.T, fixture string) (model, *sqlite.Inspector) {
+func newFixtureModel(t *testing.T, fixture string) (model, storage.Database) {
 	t.Helper()
 
-	inspector, err := sqlite.Open(fixturePath(fixture))
+	db, err := storage.Open(fixturePath(fixture))
 	if err != nil {
 		t.Fatalf("Open(%s) returned error: %v", fixture, err)
 	}
-	t.Cleanup(func() { _ = inspector.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
-	metadata, err := inspector.InspectDatabaseMetadata()
+	overview, err := db.Overview()
 	if err != nil {
-		t.Fatalf("InspectDatabaseMetadata returned error: %v", err)
+		t.Fatalf("Overview returned error: %v", err)
 	}
 
-	m, err := newModel(inspector, metadata)
+	m, err := newModel(db, overview)
 	if err != nil {
 		t.Fatalf("newModel returned error: %v", err)
 	}
-	return m, inspector
+	return m, db
 }
 
-// distinctSchemaRoots re-derives the expected root set straight from the view model so
+// distinctSchemaIDs re-derives the expected b-tree id set straight from the view model so
 // the test does not depend on collectBTreeRoots' own logic.
-func distinctSchemaRoots(db databaseViewModel) []uint32 {
-	seen := map[uint32]bool{}
-	roots := []uint32{}
+func distinctSchemaIDs(db databaseViewModel) []storage.BTreeID {
+	seen := map[storage.BTreeID]bool{}
+	ids := []storage.BTreeID{}
 	for _, obj := range append(append([]schemaObjectViewModel{}, db.Tables...), db.Indexes...) {
-		if obj.RootPage == 0 || seen[obj.RootPage] {
+		if obj.RootPage == 0 || obj.ID == "" || seen[obj.ID] {
 			continue
 		}
-		seen[obj.RootPage] = true
-		roots = append(roots, obj.RootPage)
+		seen[obj.ID] = true
+		ids = append(ids, obj.ID)
 	}
-	sort.Slice(roots, func(a, b int) bool { return roots[a] < roots[b] })
-	return roots
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	return ids
 }
 
 func TestCollectBTreeRoots(t *testing.T) {
@@ -61,21 +61,21 @@ func TestCollectBTreeRoots(t *testing.T) {
 			m, _ := newFixtureModel(t, fixture)
 			got := collectBTreeRoots(m.db)
 
-			seen := map[uint32]bool{}
-			for _, r := range got {
-				if r == 0 {
+			seen := map[storage.BTreeID]bool{}
+			for _, id := range got {
+				if id == "" {
 					t.Fatalf("collectBTreeRoots included a zero root: %v", got)
 				}
-				if seen[r] {
-					t.Fatalf("collectBTreeRoots produced a duplicate root %d: %v", r, got)
+				if seen[id] {
+					t.Fatalf("collectBTreeRoots produced a duplicate id %s: %v", id, got)
 				}
-				seen[r] = true
+				seen[id] = true
 			}
 
-			gotSorted := append([]uint32{}, got...)
+			gotSorted := append([]storage.BTreeID{}, got...)
 			sort.Slice(gotSorted, func(a, b int) bool { return gotSorted[a] < gotSorted[b] })
-			want := distinctSchemaRoots(m.db)
-			if !equalRoots(gotSorted, want) {
+			want := distinctSchemaIDs(m.db)
+			if !equalBTreeIDs(gotSorted, want) {
 				t.Fatalf("collectBTreeRoots = %v, want %v", gotSorted, want)
 			}
 		})
@@ -92,7 +92,7 @@ func TestInitFanOut(t *testing.T) {
 	if m.indexPending != m.indexTotal {
 		t.Fatalf("indexPending=%d != indexTotal=%d at launch", m.indexPending, m.indexTotal)
 	}
-	if want := len(distinctSchemaRoots(m.db)); m.indexTotal != want {
+	if want := len(distinctSchemaIDs(m.db)); m.indexTotal != want {
 		t.Fatalf("indexTotal=%d, want %d distinct non-zero schema roots", m.indexTotal, want)
 	}
 	if cmd := m.Init(); cmd == nil && m.indexTotal > 0 {
@@ -112,41 +112,41 @@ func TestInitNoRoots(t *testing.T) {
 func TestIndexBTreeCmd(t *testing.T) {
 	t.Parallel()
 
-	m, inspector := newFixtureModel(t, "companies.db")
+	m, db := newFixtureModel(t, "companies.db")
 	if len(m.indexRoots) == 0 {
 		t.Fatal("no roots to test")
 	}
-	root := m.indexRoots[0]
+	id := m.indexRoots[0]
 
-	msg := indexBTreeCmd(inspector, root)()
+	msg := indexBTreeCmd(db, id)()
 	indexed, ok := msg.(btreeIndexedMsg)
 	if !ok {
 		t.Fatalf("indexBTreeCmd produced %T, want btreeIndexedMsg", msg)
 	}
 	if indexed.err != nil {
-		t.Fatalf("indexBTreeCmd(%d) err = %v, want nil", root, indexed.err)
+		t.Fatalf("indexBTreeCmd(%s) err = %v, want nil", id, indexed.err)
 	}
-	if indexed.root != root {
-		t.Fatalf("msg.root = %d, want %d", indexed.root, root)
+	if indexed.id != id {
+		t.Fatalf("msg.id = %s, want %s", indexed.id, id)
 	}
 
-	want, err := inspector.PagesForRoot(root)
+	want, err := db.PagesForBTree(id)
 	if err != nil {
-		t.Fatalf("PagesForRoot(%d) returned error: %v", root, err)
+		t.Fatalf("PagesForBTree(%s) returned error: %v", id, err)
 	}
-	if !equalRoots(indexed.walk.Pages, want.Pages) {
-		t.Fatalf("msg.walk.Pages = %v, want %v", indexed.walk.Pages, want.Pages)
+	if !equalPageRefs(indexed.pages, want) {
+		t.Fatalf("msg.pages = %v, want %v", indexed.pages, want)
 	}
 }
 
 func TestUpdateReductionEndToEnd(t *testing.T) {
 	t.Parallel()
 
-	m, inspector := newFixtureModel(t, "companies.db")
+	m, db := newFixtureModel(t, "companies.db")
 
 	var current model = m
-	for _, root := range m.indexRoots {
-		msg := indexBTreeCmd(inspector, root)()
+	for _, id := range m.indexRoots {
+		msg := indexBTreeCmd(db, id)()
 		next, _ := current.Update(msg)
 		current = next.(model)
 	}
@@ -157,17 +157,17 @@ func TestUpdateReductionEndToEnd(t *testing.T) {
 	if len(current.indexErrors) != 0 {
 		t.Fatalf("indexErrors = %v, want empty", current.indexErrors)
 	}
-	for _, root := range m.indexRoots {
-		got, ok := current.pageIndex.Walk(root)
+	for _, id := range m.indexRoots {
+		got, ok := current.pageIndex[id]
 		if !ok {
-			t.Fatalf("pageIndex missing root %d after indexing", root)
+			t.Fatalf("pageIndex missing id %s after indexing", id)
 		}
-		want, err := inspector.PagesForRoot(root)
+		want, err := db.PagesForBTree(id)
 		if err != nil {
-			t.Fatalf("PagesForRoot(%d) returned error: %v", root, err)
+			t.Fatalf("PagesForBTree(%s) returned error: %v", id, err)
 		}
-		if !equalRoots(got.Pages, want.Pages) {
-			t.Fatalf("pageIndex.Walk(%d).Pages = %v, want %v", root, got.Pages, want.Pages)
+		if !equalPageRefs(got, want) {
+			t.Fatalf("pageIndex[%s] = %v, want %v", id, got, want)
 		}
 	}
 }
@@ -177,23 +177,35 @@ func TestUpdateReductionHardFailure(t *testing.T) {
 
 	m, _ := newFixtureModel(t, "companies.db")
 	pendingBefore := m.indexPending
-	const badRoot uint32 = 999999
+	const badID storage.BTreeID = "table:missing"
 
-	next, _ := m.Update(btreeIndexedMsg{root: badRoot, err: errors.New("boom")})
+	next, _ := m.Update(btreeIndexedMsg{id: badID, err: errors.New("boom")})
 	current := next.(model)
 
-	if reason, ok := current.indexErrors[badRoot]; !ok || reason != "boom" {
-		t.Fatalf("indexErrors[%d] = %q (ok=%v), want %q", badRoot, reason, ok, "boom")
+	if reason, ok := current.indexErrors[badID]; !ok || reason != "boom" {
+		t.Fatalf("indexErrors[%s] = %q (ok=%v), want %q", badID, reason, ok, "boom")
 	}
-	if _, ok := current.pageIndex.Walk(badRoot); ok {
-		t.Fatalf("failed root %d must not be present in pageIndex", badRoot)
+	if _, ok := current.pageIndex[badID]; ok {
+		t.Fatalf("failed id %s must not be present in pageIndex", badID)
 	}
 	if current.indexPending != pendingBefore-1 {
 		t.Fatalf("indexPending = %d, want %d after one failure", current.indexPending, pendingBefore-1)
 	}
 }
 
-func equalRoots(got []uint32, want []uint32) bool {
+func equalBTreeIDs(got []storage.BTreeID, want []storage.BTreeID) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalPageRefs(got []storage.PageRef, want []storage.PageRef) bool {
 	if len(got) != len(want) {
 		return false
 	}

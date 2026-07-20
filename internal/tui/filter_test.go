@@ -5,16 +5,16 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/nikitazigman/badger/internal/sqlite"
+	"github.com/nikitazigman/badger/internal/storage"
 )
 
 // indexAll feeds every root's btreeIndexedMsg through Update so the model's pageIndex is
 // fully populated, mirroring what Init's fan-out produces at launch.
-func indexAll(t *testing.T, m model, inspector *sqlite.Inspector) model {
+func indexAll(t *testing.T, m model, db storage.Database) model {
 	t.Helper()
 	current := m
-	for _, root := range m.indexRoots {
-		next, _ := current.Update(indexBTreeCmd(inspector, root)())
+	for _, id := range m.indexRoots {
+		next, _ := current.Update(indexBTreeCmd(db, id)())
 		current = next.(model)
 	}
 	return current
@@ -38,8 +38,8 @@ func keyMsg(s string) tea.KeyMsg {
 func TestApplyFilterIndexed(t *testing.T) {
 	t.Parallel()
 
-	m, inspector := newFixtureModel(t, "companies.db")
-	m = indexAll(t, m, inspector)
+	m, db := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, db)
 	companies := objectByName(t, m.db, "companies")
 
 	m.applyFilter(companies)
@@ -51,20 +51,20 @@ func TestApplyFilterIndexed(t *testing.T) {
 	if !ok {
 		t.Fatal("filteredPages returned ok=false after applying a filter")
 	}
-	walk, err := inspector.PagesForRoot(companies.RootPage)
+	want, err := db.PagesForBTree(companies.ID)
 	if err != nil {
-		t.Fatalf("PagesForRoot(%d) returned error: %v", companies.RootPage, err)
+		t.Fatalf("PagesForBTree(%s) returned error: %v", companies.ID, err)
 	}
-	if !equalRoots(pages, walk.Pages) {
-		t.Fatalf("filteredPages = %v, want PagesForRoot(root).Pages = %v", pages, walk.Pages)
+	if !equalPageRefs(pages, want) {
+		t.Fatalf("filteredPages = %v, want PagesForBTree(id) = %v", pages, want)
 	}
 }
 
 func TestApplyFilterSQLiteSchema(t *testing.T) {
 	t.Parallel()
 
-	m, inspector := newFixtureModel(t, "companies.db")
-	m = indexAll(t, m, inspector)
+	m, db := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, db)
 	catalog := objectByName(t, m.db, "sqlite_schema")
 
 	if !catalog.IsSystem {
@@ -83,12 +83,12 @@ func TestApplyFilterSQLiteSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("filteredPages returned ok=false after applying sqlite_schema filter")
 	}
-	walk, err := inspector.PagesForRoot(1)
+	want, err := db.PagesForBTree(catalog.ID)
 	if err != nil {
-		t.Fatalf("PagesForRoot(1) returned error: %v", err)
+		t.Fatalf("PagesForBTree(%s) returned error: %v", catalog.ID, err)
 	}
-	if !equalRoots(pages, walk.Pages) {
-		t.Fatalf("filteredPages = %v, want sqlite_schema walk pages %v", pages, walk.Pages)
+	if !equalPageRefs(pages, want) {
+		t.Fatalf("filteredPages = %v, want sqlite_schema pages %v", pages, want)
 	}
 }
 
@@ -119,7 +119,7 @@ func TestApplyFilterHardFailed(t *testing.T) {
 
 	m, _ := newFixtureModel(t, "companies.db")
 	companies := objectByName(t, m.db, "companies")
-	m.indexErrors[companies.RootPage] = "root unreadable"
+	m.indexErrors[companies.ID] = "root unreadable"
 
 	m.applyFilter(companies)
 
@@ -164,7 +164,7 @@ func TestSwitchAndClearFilter(t *testing.T) {
 	if !ok {
 		t.Fatal("filter not active after switching")
 	}
-	if equalRoots(first, second) {
+	if equalPageRefs(first, second) {
 		t.Fatal("switching the filter did not change the page set")
 	}
 	if m.activeFilter.object.Name != "idx_companies_country" {
@@ -177,25 +177,20 @@ func TestSwitchAndClearFilter(t *testing.T) {
 	}
 }
 
-func TestDegradedFilterStillApplies(t *testing.T) {
+func TestReadyFilterStillApplies(t *testing.T) {
 	t.Parallel()
 
 	m, _ := newFixtureModel(t, "companies.db")
 	companies := objectByName(t, m.db, "companies")
-	// Synthesize a degraded walk: a couple of readable pages plus one skipped child.
-	m.pageIndex.Set(sqlite.PageWalk{
-		Root:    companies.RootPage,
-		Pages:   []uint32{companies.RootPage, 9},
-		Skipped: []sqlite.SkippedPage{{Page: 774, Parent: companies.RootPage, Reason: "short read"}},
-	})
+	m.pageIndex[companies.ID] = []storage.PageRef{{ID: companies.RootPage}, {ID: 9}}
 
 	m.applyFilter(companies)
 	if !m.isFiltered() {
-		t.Fatal("a degraded walk must still apply a filter")
+		t.Fatal("a ready page set must apply a filter")
 	}
 	footer := m.filterToken()
-	if !strings.Contains(footer, "1 skipped") || !strings.Contains(footer, "⚠ page 774 unreadable") {
-		t.Fatalf("footer = %q, want skipped + unreadable diagnostics", footer)
+	if strings.Contains(footer, "skipped") || strings.Contains(footer, "unreadable") {
+		t.Fatalf("footer = %q, want no skipped diagnostics from storage filter API", footer)
 	}
 }
 
@@ -210,13 +205,13 @@ func TestNavRebuildOnApplyAndClear(t *testing.T) {
 
 	// PAGES rows must equal exactly the filtered page set.
 	want, _ := m.filteredPages()
-	var gotPages []uint32
+	var gotPages []storage.PageRef
 	for _, item := range m.navItems {
 		if item.kind == navPage {
-			gotPages = append(gotPages, item.pageNumber)
+			gotPages = append(gotPages, storage.PageRef{ID: item.pageNumber})
 		}
 	}
-	if !equalRoots(gotPages, want) {
+	if !equalPageRefs(gotPages, want) {
 		t.Fatalf("filtered PAGES rows = %v, want %v", gotPages, want)
 	}
 	// Cursor sits on the companies row.
@@ -233,7 +228,7 @@ func TestNavRebuildOnApplyAndClear(t *testing.T) {
 			count++
 		}
 	}
-	if uint32(count) != m.db.PageCount {
+	if uint64(count) != m.db.PageCount {
 		t.Fatalf("after clearFilter PAGES count = %d, want full %d", count, m.db.PageCount)
 	}
 	if m.selectedIndex != srcIndex {
