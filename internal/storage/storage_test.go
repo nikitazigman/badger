@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/nikitazigman/badger/internal/bbolt"
@@ -144,8 +145,8 @@ func TestOpenBboltOverview(t *testing.T) {
 	if users == nil {
 		t.Fatal("Overview missing users top-level bucket b-tree item")
 	}
-	if users.Kind != BTreeBucket {
-		t.Fatalf("users kind = %q, want %q", users.Kind, BTreeBucket)
+	if users.Kind != BTreeInlineBucket {
+		t.Fatalf("users kind = %q, want %q", users.Kind, BTreeInlineBucket)
 	}
 	if users.ID == "" {
 		t.Fatal("users bucket has empty stable id")
@@ -155,6 +156,9 @@ func TestOpenBboltOverview(t *testing.T) {
 	}
 	if testFieldValue(users.Rows, "Root page") == "" {
 		t.Fatal("users bucket row missing root page metadata")
+	}
+	if testFieldValue(users.Rows, "Storage") != "embedded in parent leaf value" {
+		t.Fatal("users inline bucket row missing embedded storage metadata")
 	}
 }
 
@@ -177,6 +181,36 @@ func TestOpenBboltNestedBucketsFixture(t *testing.T) {
 	if overview.FirstPageID != 0 || overview.PageCount == 0 {
 		t.Fatalf("unexpected bbolt page range: first=%d count=%d", overview.FirstPageID, overview.PageCount)
 	}
+	level1 := btreeByPath(overview.BTrees, "alpha/level_1")
+	if level1 == nil {
+		t.Fatal("Overview missing nested alpha level_1 bucket")
+	}
+	if level1.Kind != BTreeBucket {
+		t.Fatalf("nested level_1 kind = %q, want %q", level1.Kind, BTreeBucket)
+	}
+	if level1.RootPage == nil {
+		t.Fatal("nested level_1 bucket has nil root page")
+	}
+	level5 := btreeByPath(overview.BTrees, "alpha/level_1/level_2/level_3/level_4/level_5")
+	if level5 == nil {
+		t.Fatal("Overview missing nested alpha level_5 bucket")
+	}
+	if level5.Kind != BTreeInlineBucket {
+		t.Fatalf("nested level_5 kind = %q, want %q", level5.Kind, BTreeInlineBucket)
+	}
+	inline := btreeByPath(overview.BTrees, "alpha/inline_1")
+	if inline == nil {
+		t.Fatal("Overview missing alpha inline_1 bucket")
+	}
+	if inline.Kind != BTreeInlineBucket {
+		t.Fatalf("inline_1 kind = %q, want %q", inline.Kind, BTreeInlineBucket)
+	}
+	if inline.RootPage != nil {
+		t.Fatalf("inline_1 root page = %+v, want nil", inline.RootPage)
+	}
+	if testFieldValue(inline.Rows, "Storage") != "embedded in parent leaf value" {
+		t.Fatal("inline_1 row missing embedded storage metadata")
+	}
 }
 
 func TestOpenBboltManyBucketsFixtureExposesMoreThan15Buckets(t *testing.T) {
@@ -194,7 +228,7 @@ func TestOpenBboltManyBucketsFixtureExposesMoreThan15Buckets(t *testing.T) {
 	}
 	topLevelBuckets := 0
 	for _, item := range overview.BTrees {
-		if item.Kind == BTreeBucket && item.Name != "root" {
+		if (item.Kind == BTreeBucket || item.Kind == BTreeInlineBucket) && item.Name != "root" && !strings.Contains(testFieldValue(item.Rows, "Path"), "/") {
 			topLevelBuckets++
 		}
 	}
@@ -254,6 +288,23 @@ func TestBboltInspectPageAndPagesForBTree(t *testing.T) {
 	}
 	if root.RootPage == nil || pages[0].ID != root.RootPage.ID {
 		t.Fatalf("PagesForBTree first page = %+v, want root %+v", pages[0], root.RootPage)
+	}
+	users := btreeByName(overview.BTrees, "users")
+	if users == nil {
+		t.Fatal("users bucket b-tree item not found")
+	}
+	if users.Kind != BTreeInlineBucket {
+		t.Fatalf("users kind = %q, want %q", users.Kind, BTreeInlineBucket)
+	}
+	inlinePages, err := db.PagesForBTree(users.ID)
+	if err != nil {
+		t.Fatalf("PagesForBTree(inline users) returned error: %v", err)
+	}
+	if len(inlinePages) != 1 {
+		t.Fatalf("PagesForBTree(inline users) returned %d pages, want parent page only", len(inlinePages))
+	}
+	if inlinePages[0].ID != root.RootPage.ID {
+		t.Fatalf("inline users page = %d, want parent root page %d", inlinePages[0].ID, root.RootPage.ID)
 	}
 
 	page, err := db.InspectPage(PageRef{ID: 0})
@@ -458,6 +509,46 @@ func TestBboltBranchPageInspectionExposesBranchRowsAndBlocks(t *testing.T) {
 	t.Fatal("branch_pages fixture did not contain a branch page")
 }
 
+func TestBboltInlineBucketLeafEntryExposesEmbeddedPageSpans(t *testing.T) {
+	t.Parallel()
+
+	page, entry := findBboltLeafEntryWithValueChild(t, filepath.Join("bbolt", "nested_inline.db"), blockPageHeader)
+	value := testHexBlockByKind(entry.Children, blockLeafValue)
+	if value == nil {
+		t.Fatal("inline bucket leaf entry missing value block")
+	}
+	if testHexBlockByKind(entry.Children, blockBucketHeader) != nil || testHexBlockByKind(entry.Children, blockInlineBucketPage) != nil {
+		t.Fatal("inline bucket internals are exposed as leaf-entry drill siblings; want them under value")
+	}
+	header := testHexBlockByKind(value.Children, blockBucketHeader)
+	if header == nil {
+		t.Fatal("inline bucket value missing bucket header child")
+	}
+	inlineHeader := testHexBlockByKind(value.Children, blockPageHeader)
+	if inlineHeader == nil {
+		t.Fatal("inline bucket value missing embedded page header child")
+	}
+	descriptors := testHexBlockByKind(value.Children, blockLeafDescriptors)
+	if descriptors == nil {
+		t.Fatal("inline bucket value missing leaf descriptor child")
+	}
+	inlineEntry := testHexBlockByKind(value.Children, blockLeafEntry)
+	if inlineEntry == nil {
+		t.Fatal("inline bucket value missing embedded leaf entry child")
+	}
+
+	assertByteSpan(t, header.Span, value.Span.Start, 16)
+	if inlineHeader.Span.Start != value.Span.Start+16 {
+		t.Fatalf("inline page header starts at %d, want parent value start + 16 = %d", inlineHeader.Span.Start, value.Span.Start+16)
+	}
+	if descriptors.Span.Start < inlineHeader.Span.Start+16 {
+		t.Fatalf("inline descriptors start at %d before inline payload offset %d", descriptors.Span.Start, inlineHeader.Span.Start+16)
+	}
+	if value.Span.End() > len(page.Raw) {
+		t.Fatalf("inline value span ends at %d beyond parent page bytes %d", value.Span.End(), len(page.Raw))
+	}
+}
+
 func TestOpenUnsupportedEngine(t *testing.T) {
 	t.Parallel()
 
@@ -474,6 +565,15 @@ func TestOpenUnsupportedEngine(t *testing.T) {
 func btreeByName(items []BTreeItem, name string) *BTreeItem {
 	for idx := range items {
 		if items[idx].Name == name {
+			return &items[idx]
+		}
+	}
+	return nil
+}
+
+func btreeByPath(items []BTreeItem, path string) *BTreeItem {
+	for idx := range items {
+		if testFieldValue(items[idx].Rows, "Path") == path {
 			return &items[idx]
 		}
 	}
@@ -539,6 +639,42 @@ func findBboltLeafEntryInspection(t *testing.T, fixturePaths []string, entryType
 	return nil, HexBlock{}
 }
 
+func findBboltLeafEntryWithValueChild(t *testing.T, fixture string, childKind string) (*PageInspection, HexBlock) {
+	t.Helper()
+
+	db, err := Open(fixturePath(fixture))
+	if err != nil {
+		t.Fatalf("Open(%s) returned error: %v", fixture, err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	})
+
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview(%s) returned error: %v", fixture, err)
+	}
+	for id := overview.FirstPageID; id < overview.FirstPageID+overview.PageCount; id++ {
+		page, err := db.InspectPage(PageRef{ID: id})
+		if err != nil {
+			t.Fatalf("InspectPage(%d) in %s returned error: %v", id, fixture, err)
+		}
+		for _, entry := range page.HexBlocks {
+			if entry.Kind != blockLeafEntry {
+				continue
+			}
+			value := testHexBlockByKind(entry.Children, blockLeafValue)
+			if value != nil && testHexBlockByKind(value.Children, childKind) != nil {
+				return page, entry
+			}
+		}
+	}
+	t.Fatalf("%s did not contain bbolt leaf entry with value child kind %q", fixture, childKind)
+	return nil, HexBlock{}
+}
+
 func assertLeafEntryStorageBlocks(t *testing.T, entry HexBlock, wantBucket bool) {
 	t.Helper()
 
@@ -560,14 +696,25 @@ func assertLeafEntryStorageBlocks(t *testing.T, entry HexBlock, wantBucket bool)
 	if value == nil {
 		t.Fatal("leaf entry missing value block")
 	}
-	if testFieldValue(value.Rows, "Value") == "" {
-		t.Fatal("leaf value block missing raw byte count")
-	}
 	if wantBucket && testFieldValue(entry.Rows, "Type") != "bucket" {
 		t.Fatalf("leaf entry type = %q, want bucket", testFieldValue(entry.Rows, "Type"))
 	}
+	if wantBucket {
+		if testFieldValue(value.Rows, "Format") != "InBucket header" && testFieldValue(value.Rows, "Format") != "InBucket header + embedded leaf page" {
+			t.Fatalf("bucket value format = %q, want decoded InBucket format", testFieldValue(value.Rows, "Format"))
+		}
+		if testFieldValue(value.Rows, "Root page") == "" {
+			t.Fatal("bucket value block missing decoded root page")
+		}
+		if testFieldValue(value.Rows, "Sequence") == "" {
+			t.Fatal("bucket value block missing decoded sequence")
+		}
+	}
 	if !wantBucket && testFieldValue(entry.Rows, "Type") != "key/value" {
 		t.Fatalf("leaf entry type = %q, want key/value", testFieldValue(entry.Rows, "Type"))
+	}
+	if !wantBucket && testFieldValue(value.Rows, "Value") == "" {
+		t.Fatal("ordinary leaf value block missing raw byte count")
 	}
 }
 

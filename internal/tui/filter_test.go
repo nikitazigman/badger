@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -28,6 +29,17 @@ func objectByName(t *testing.T, db databaseViewModel, name string) schemaObjectV
 		}
 	}
 	t.Fatalf("schema object %q not found", name)
+	return schemaObjectViewModel{}
+}
+
+func objectByPath(t *testing.T, db databaseViewModel, path string) schemaObjectViewModel {
+	t.Helper()
+	for _, obj := range append(append([]schemaObjectViewModel{}, db.Tables...), db.Indexes...) {
+		if obj.Rows != nil && fieldValue(*obj.Rows, "Path") == path {
+			return obj
+		}
+	}
+	t.Fatalf("schema object path %q not found", path)
 	return schemaObjectViewModel{}
 }
 
@@ -111,6 +123,75 @@ func TestApplyFilterVirtualTable(t *testing.T) {
 	pages, ok := m.filteredPages()
 	if !ok || pages == nil || len(pages) != 0 {
 		t.Fatalf("filteredPages = (%v, %v), want ([]uint32{}, true)", pages, ok)
+	}
+}
+
+func TestApplyFilterInlineBboltBucketShowsParentPage(t *testing.T) {
+	t.Parallel()
+
+	m, db := newFixtureModel(t, filepath.Join("bbolt", "nested_inline.db"))
+	m = indexAll(t, m, db)
+	inline := objectByPath(t, m.db, "alpha/inline_1")
+
+	if inline.Kind != storage.BTreeInlineBucket {
+		t.Fatalf("inline kind = %q, want %q", inline.Kind, storage.BTreeInlineBucket)
+	}
+	if inline.RootPage != 0 {
+		t.Fatalf("inline root page = %d, want 0", inline.RootPage)
+	}
+
+	m.applyFilter(inline)
+
+	if !m.isFiltered() {
+		t.Fatal("applyFilter on inline bucket did not set a filter")
+	}
+	pages, ok := m.filteredPages()
+	if !ok {
+		t.Fatal("filteredPages returned ok=false after applying inline bucket filter")
+	}
+	want, err := db.PagesForBTree(inline.ID)
+	if err != nil {
+		t.Fatalf("PagesForBTree(%s) returned error: %v", inline.ID, err)
+	}
+	if len(want) != 1 {
+		t.Fatalf("PagesForBTree(%s) returned %d pages, want parent page only", inline.ID, len(want))
+	}
+	if !equalPageRefs(pages, want) {
+		t.Fatalf("filteredPages = %v, want inline parent page %v", pages, want)
+	}
+}
+
+func TestFilterSwitchesBetweenDuplicateBboltInlineBucketNames(t *testing.T) {
+	t.Parallel()
+
+	m, db := newFixtureModel(t, filepath.Join("bbolt", "nested_inline.db"))
+	m = indexAll(t, m, db)
+	alpha := objectByPath(t, m.db, "alpha/inline_1")
+	beta := objectByPath(t, m.db, "beta/inline_1")
+
+	if alpha.ID == beta.ID {
+		t.Fatal("setup: duplicate inline buckets have the same ID")
+	}
+	if alpha.Name != beta.Name || alpha.RootPage != beta.RootPage {
+		t.Fatalf("setup: buckets are not ambiguous by name/root: alpha=%+v beta=%+v", alpha, beta)
+	}
+
+	m.applyFilter(alpha)
+	if !m.objectIsFilterSource(alpha) {
+		t.Fatal("alpha inline bucket is not the active filter source")
+	}
+	if m.objectIsFilterSource(beta) {
+		t.Fatal("beta inline bucket was treated as the same filter source as alpha")
+	}
+
+	m.selectedIndex = indexOfBTreeRow(m.navItems, beta)
+	next, _ := m.Update(keyMsg("f"))
+	switched := next.(model)
+	if !switched.isFiltered() {
+		t.Fatal("f on duplicate-name inline bucket cleared the filter; want switch")
+	}
+	if switched.activeFilter.object.ID != beta.ID {
+		t.Fatalf("active filter ID = %q, want %q", switched.activeFilter.object.ID, beta.ID)
 	}
 }
 

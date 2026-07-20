@@ -16,6 +16,7 @@ type schemaObjectViewModel struct {
 	RootPage  uint64
 	SQL       string
 	IsSystem  bool
+	Rows      *[]storage.Field
 }
 
 type labelValue struct {
@@ -60,6 +61,7 @@ func newDatabaseViewModel(overview *storage.DatabaseOverview) (databaseViewModel
 	}
 
 	for _, item := range overview.BTrees {
+		rows := append([]storage.Field(nil), item.Rows...)
 		object := schemaObjectViewModel{
 			ID:        item.ID,
 			Kind:      item.Kind,
@@ -68,6 +70,7 @@ func newDatabaseViewModel(overview *storage.DatabaseOverview) (databaseViewModel
 			TableName: fieldValue(item.Rows, "Table"),
 			SQL:       fieldValue(item.Rows, "SQL"),
 			IsSystem:  item.System,
+			Rows:      &rows,
 		}
 		if object.Type == string(storage.BTreeRootless) {
 			object.Type = fieldValue(item.Rows, "Type")

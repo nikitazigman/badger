@@ -118,6 +118,7 @@ func (i *Inspector) BucketEntries(root PageID) ([]BucketEntry, PageWalk, error) 
 		}
 
 		bucketIndex := 0
+		inlineIndex := 0
 		for idx, element := range page.LeafPayload.LeafElements {
 			if element.Flags.Value != BucketLeafFlag {
 				continue
@@ -126,11 +127,18 @@ func (i *Inspector) BucketEntries(root PageID) ([]BucketEntry, PageWalk, error) 
 				bucketIndex++
 				continue
 			}
+			bucket := page.LeafPayload.NestedBucket[bucketIndex]
+			var inline *InlineBucket
+			if bucket.Root.Value == 0 && inlineIndex < len(page.LeafPayload.InlineBucket) {
+				inline = &page.LeafPayload.InlineBucket[inlineIndex]
+				inlineIndex++
+			}
 			entries = append(entries, BucketEntry{
 				PageID:       page.ID,
 				ElementIndex: idx,
 				Key:          page.LeafPayload.KeyValue[idx].Key,
-				Bucket:       page.LeafPayload.NestedBucket[bucketIndex],
+				Bucket:       bucket,
+				Inline:       inline,
 			})
 			bucketIndex++
 		}

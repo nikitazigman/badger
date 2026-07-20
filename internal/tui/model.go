@@ -123,13 +123,12 @@ func newModel(database storage.Database, overview *storage.DatabaseOverview) (mo
 	}, nil
 }
 
-// applyFilter scopes PAGES to obj's b-tree. A virtual table / view (RootPage == 0) is a
-// valid filter with an empty page set; an indexed object filters to its walked pages. If
-// the object hard-failed or has not been walked yet, the filter is NOT applied and a
-// status explains why (the user re-presses f once indexing finishes — see design §4.5).
+// applyFilter scopes PAGES to obj's b-tree. A rootless object is a valid filter with an
+// empty page set; an indexed object filters to its walked pages. If the object hard-failed
+// or has not been walked yet, the filter is NOT applied and a status explains why.
 func (m *model) applyFilter(obj schemaObjectViewModel) {
 	switch {
-	case obj.RootPage == 0: // virtual table / view: no b-tree, valid empty filter
+	case obj.RootPage == 0 && obj.Kind != storage.BTreeInlineBucket:
 		m.setFilter(obj)
 	case m.walkPresent(obj.ID):
 		m.setFilter(obj)
@@ -172,7 +171,7 @@ func (m model) filteredPages() ([]storage.PageRef, bool) {
 		return nil, false
 	}
 	root := m.activeFilter.object.RootPage
-	if root == 0 {
+	if root == 0 && m.activeFilter.object.Kind != storage.BTreeInlineBucket {
 		return []storage.PageRef{}, true
 	}
 	return append([]storage.PageRef(nil), m.pageIndex[m.activeFilter.object.ID]...), true
@@ -189,7 +188,8 @@ func (m model) hasIndexError(id storage.BTreeID) bool {
 }
 
 // objectIsFilterSource reports whether obj is the object the active filter is scoped to.
-// Name disambiguates virtual tables / views, which all share RootPage == 0.
+// Stable storage IDs disambiguate nested/inline buckets; name/root is the fallback for
+// synthetic rootless objects that may not have an ID.
 // pagesSummaryLine is the summary pane's Pages row for obj: the filtered count when obj is
 // the active filter source, "— (unfiltered)" otherwise (design §4.1 / §4.2).
 func (m model) pagesSummaryLine(obj schemaObjectViewModel) string {
@@ -201,9 +201,14 @@ func (m model) pagesSummaryLine(obj schemaObjectViewModel) string {
 }
 
 func (m model) objectIsFilterSource(obj schemaObjectViewModel) bool {
-	return m.activeFilter != nil &&
-		m.activeFilter.object.Name == obj.Name &&
-		m.activeFilter.object.RootPage == obj.RootPage
+	if m.activeFilter == nil {
+		return false
+	}
+	active := m.activeFilter.object
+	if active.ID != "" && obj.ID != "" {
+		return active.ID == obj.ID
+	}
+	return active.Name == obj.Name && active.RootPage == obj.RootPage
 }
 
 func (m model) Init() tea.Cmd {
@@ -1172,6 +1177,12 @@ func (m model) viewSchemaObject(width int) []string {
 	if obj == nil {
 		return []string{"No schema object selected."}
 	}
+	if obj.Kind == storage.BTreeBucket || obj.Kind == storage.BTreeInlineBucket {
+		if obj.Rows == nil {
+			return []string{"No storage object metadata."}
+		}
+		return wrapLines(fieldLines(*obj.Rows), width)
+	}
 
 	rootLine := fmt.Sprintf("Root page: %d", obj.RootPage)
 	if obj.RootPage == 0 {
@@ -1779,6 +1790,10 @@ func objectIcon(obj schemaObjectViewModel) string {
 	switch {
 	case obj.Type == "index":
 		return "◈"
+	case obj.Kind == storage.BTreeInlineBucket:
+		return "⊞"
+	case obj.Kind == storage.BTreeBucket:
+		return "▦"
 	case obj.RootPage == 0:
 		return "⊞"
 	default:
@@ -1789,24 +1804,35 @@ func objectIcon(obj schemaObjectViewModel) string {
 // indexOfBTreeRow returns the nav index of the B-TREES row for obj, or 0 if absent.
 func indexOfBTreeRow(items []navItem, obj schemaObjectViewModel) int {
 	for idx, item := range items {
-		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil &&
-			item.schema.Name == obj.Name && item.schema.RootPage == obj.RootPage {
+		if item.kind != navTable && item.kind != navIndex {
+			continue
+		}
+		if item.schema == nil {
+			continue
+		}
+		if obj.ID != "" && item.schema.ID == obj.ID {
+			return idx
+		}
+		if obj.ID == "" && item.schema.Name == obj.Name && item.schema.RootPage == obj.RootPage {
 			return idx
 		}
 	}
 	return 0
 }
 
-// collectBTreeRoots returns the unique, non-zero b-tree root pages across the database's
-// tables and indexes. A root belongs to exactly one object, but it dedupes defensively;
-// RootPage == 0 (views / virtual tables, which have no b-tree) is skipped.
+// collectBTreeRoots returns unique storage object IDs that can produce a page set. A
+// physical root belongs to exactly one object, but this dedupes defensively; rootless
+// objects are skipped while inline buckets are kept so storage can return the parent page.
 func collectBTreeRoots(db databaseViewModel) []storage.BTreeID {
 	seen := make(map[storage.BTreeID]bool)
 	roots := make([]storage.BTreeID, 0, len(db.Tables)+len(db.Indexes))
 
 	collect := func(objects []schemaObjectViewModel) {
 		for _, obj := range objects {
-			if obj.RootPage == 0 || obj.ID == "" || seen[obj.ID] {
+			if obj.ID == "" || seen[obj.ID] {
+				continue
+			}
+			if obj.RootPage == 0 && obj.Kind != storage.BTreeInlineBucket {
 				continue
 			}
 			seen[obj.ID] = true

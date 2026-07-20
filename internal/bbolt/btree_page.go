@@ -147,7 +147,7 @@ type LeafPayload struct {
 	LeafElements []LeafElement
 	KeyValue     []KeyValue
 	NestedBucket []NestedBucket
-	InlineBucket *InlineBucket
+	InlineBucket []InlineBucket
 }
 
 type LeafFlagType uint32
@@ -182,13 +182,13 @@ type BucketEntry struct {
 	ElementIndex int
 	Key          Payload
 	Bucket       NestedBucket
+	Inline       *InlineBucket
 }
 
 type InlineBucket struct {
-	Meta         Meta
-	Header       PageHeader
-	LeafElements []LeafElement
-	KeyValue     []KeyValue
+	Meta        Meta
+	Header      PageHeader
+	LeafPayload LeafPayload
 }
 
 type FreelistPayload struct {

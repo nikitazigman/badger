@@ -103,26 +103,30 @@ func parsePage(buf []byte) (BTreePage, error) {
 }
 
 func parseHeader(buf []byte) (PageHeader, error) {
+	return parseHeaderAt(buf, 0)
+}
+
+func parseHeaderAt(buf []byte, metaBase int) (PageHeader, error) {
 	header := PageHeader{}
 	if len(buf) < 16 {
 		return header, fmt.Errorf("Header size is 16 bytes, got %d bytes", len(buf))
 	}
 
-	header.Meta = metaFromOffset(0, 16)
+	header.Meta = metaFromOffset(metaBase, 16)
 	header.ID = PageIDField{
-		Meta:  metaFromOffset(0, 8),
+		Meta:  metaFromOffset(metaBase, 8),
 		Value: PageID(binary.LittleEndian.Uint64(buf[0:8])),
 	}
 	header.Flags = FlagField{
-		Meta:  metaFromOffset(8, 2),
+		Meta:  metaFromOffset(metaBase+8, 2),
 		Value: FlagType(binary.LittleEndian.Uint16(buf[8:10])),
 	}
 	header.Count = Uint16Field{
-		Meta:  metaFromOffset(10, 2),
+		Meta:  metaFromOffset(metaBase+10, 2),
 		Value: binary.LittleEndian.Uint16(buf[10:12]),
 	}
 	header.Overflow = Uint32Field{
-		Meta:  metaFromOffset(12, 4),
+		Meta:  metaFromOffset(metaBase+12, 4),
 		Value: binary.LittleEndian.Uint32(buf[12:16]),
 	}
 
@@ -295,6 +299,10 @@ func parseBranchPayload(page []byte, count uint16) (*BranchPayload, error) {
 }
 
 func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
+	return parseLeafPayloadAt(page, count, 0)
+}
+
+func parseLeafPayloadAt(page []byte, count uint16, metaBase int) (*LeafPayload, error) {
 	const start = 16
 	const descriptorSize = 16
 
@@ -313,6 +321,7 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 	payload.LeafElements = make([]LeafElement, 0, count)
 	payload.KeyValue = make([]KeyValue, 0, count)
 	payload.NestedBucket = make([]NestedBucket, 0)
+	payload.InlineBucket = make([]InlineBucket, 0)
 
 	maxEnd := descriptorsEnd
 	for idx := 0; idx < int(count); idx++ {
@@ -321,21 +330,21 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 		descriptor := page[descStart:descEnd]
 
 		element := LeafElement{
-			Meta: metaFromOffset(descStart, descriptorSize),
+			Meta: metaFromOffset(metaBase+descStart, descriptorSize),
 			Flags: LeafFlagField{
-				Meta:  metaFromOffset(descStart, 4),
+				Meta:  metaFromOffset(metaBase+descStart, 4),
 				Value: LeafFlagType(binary.LittleEndian.Uint32(descriptor[0:4])),
 			},
 			Pos: Uint32Field{
-				Meta:  metaFromOffset(descStart+4, 4),
+				Meta:  metaFromOffset(metaBase+descStart+4, 4),
 				Value: binary.LittleEndian.Uint32(descriptor[4:8]),
 			},
 			KeySize: Uint32Field{
-				Meta:  metaFromOffset(descStart+8, 4),
+				Meta:  metaFromOffset(metaBase+descStart+8, 4),
 				Value: binary.LittleEndian.Uint32(descriptor[8:12]),
 			},
 			ValueSize: Uint32Field{
-				Meta:  metaFromOffset(descStart+12, 4),
+				Meta:  metaFromOffset(metaBase+descStart+12, 4),
 				Value: binary.LittleEndian.Uint32(descriptor[12:16]),
 			},
 		}
@@ -350,13 +359,13 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 		}
 
 		kv := KeyValue{
-			Meta: metaFromOffset(keyStart, valueEnd-keyStart),
+			Meta: metaFromOffset(metaBase+keyStart, valueEnd-keyStart),
 			Key: Payload{
-				Meta: metaFromOffset(keyStart, keyEnd-keyStart),
+				Meta: metaFromOffset(metaBase+keyStart, keyEnd-keyStart),
 				Data: append([]byte(nil), page[keyStart:keyEnd]...),
 			},
 			Value: Payload{
-				Meta: metaFromOffset(valueStart, valueEnd-valueStart),
+				Meta: metaFromOffset(metaBase+valueStart, valueEnd-valueStart),
 				Data: append([]byte(nil), page[valueStart:valueEnd]...),
 			},
 		}
@@ -369,13 +378,20 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 				return payload, fmt.Errorf("leaf element %d bucket header: %w", idx, err)
 			}
 			payload.NestedBucket = append(payload.NestedBucket, bucket)
+			if bucket.Root.Value == 0 {
+				inline, err := parseInlineBucket(kv.Value)
+				if err != nil {
+					return payload, fmt.Errorf("leaf element %d inline bucket: %w", idx, err)
+				}
+				payload.InlineBucket = append(payload.InlineBucket, inline)
+			}
 		}
 		if valueEnd > maxEnd {
 			maxEnd = valueEnd
 		}
 
 	}
-	payload.Meta = metaFromOffset(start, maxEnd-start)
+	payload.Meta = metaFromOffset(metaBase+start, maxEnd-start)
 
 	return payload, nil
 }
@@ -398,6 +414,40 @@ func parseNestedBucket(value Payload) (NestedBucket, error) {
 		Value: binary.LittleEndian.Uint64(value.Data[8:16]),
 	}
 	return bucket, nil
+}
+
+func parseInlineBucket(value Payload) (InlineBucket, error) {
+	const bucketHeaderSize = 16
+	const pageHeaderSize = 16
+
+	inline := InlineBucket{}
+	if len(value.Data) < bucketHeaderSize+pageHeaderSize {
+		return inline, fmt.Errorf("inline bucket size is %d bytes, want at least %d bytes", len(value.Data), bucketHeaderSize+pageHeaderSize)
+	}
+
+	pageStart := bucketHeaderSize
+	pageBytes := value.Data[pageStart:]
+	pageMetaBase := value.Meta.StartOffset + pageStart
+
+	header, err := parseHeaderAt(pageBytes, pageMetaBase)
+	if err != nil {
+		return inline, err
+	}
+	if header.Flags.Value != LeafPageFlag {
+		return inline, fmt.Errorf("inline bucket page flag is 0x%x, want leaf", uint16(header.Flags.Value))
+	}
+	if header.Overflow.Value != 0 {
+		return inline, fmt.Errorf("inline bucket overflow is %d, want 0", header.Overflow.Value)
+	}
+
+	leaf, err := parseLeafPayloadAt(pageBytes, header.Count.Value, pageMetaBase)
+	if err != nil {
+		return inline, err
+	}
+	inline.Meta = metaFromOffset(pageMetaBase, leaf.Meta.EndOffset()-pageMetaBase)
+	inline.Header = header
+	inline.LeafPayload = *leaf
+	return inline, nil
 }
 
 func payloadRange(page []byte, base int, relative uint32, size uint32) (int, int, error) {
