@@ -80,6 +80,10 @@ func parsePage(buf []byte) (BTreePage, error) {
 		}
 	case BranchPageFlag:
 		page.Classification = PageClassBranch
+		page.BranchPayload, err = parseBranchPayload(buf, page.Header.Count.Value)
+		if err != nil {
+			return page, fmt.Errorf("page %d branch payload: %w", page.Header.ID.Value, err)
+		}
 	case LeafPageFlag:
 		page.Classification = PageClassLeaf
 		page.LeafPayload, err = parseLeafPayload(buf, page.Header.Count.Value)
@@ -225,6 +229,71 @@ func parseFreelistPayload(page []byte, count uint16) (*FreelistPayload, error) {
 	return payload, nil
 }
 
+func parseBranchPayload(page []byte, count uint16) (*BranchPayload, error) {
+	const start = 16
+	const descriptorSize = 16
+
+	payload := &BranchPayload{}
+	if len(page) < start {
+		return payload, fmt.Errorf("branch page size is %d bytes, want at least %d", len(page), start)
+	}
+
+	descriptorBytes := int(count) * descriptorSize
+	descriptorsEnd := start + descriptorBytes
+	if descriptorsEnd > len(page) {
+		return payload, fmt.Errorf("branch descriptor bytes %d exceed available payload bytes %d", descriptorBytes, len(page)-start)
+	}
+
+	payload.Meta = metaFromOffset(start, descriptorBytes)
+	payload.BranchElements = make([]BranchElement, 0, count)
+	payload.KeyValue = make([]KeyValue, 0, count)
+
+	maxEnd := descriptorsEnd
+	for idx := 0; idx < int(count); idx++ {
+		descStart := start + idx*descriptorSize
+		descEnd := descStart + descriptorSize
+		descriptor := page[descStart:descEnd]
+
+		element := BranchElement{
+			Meta: metaFromOffset(descStart, descriptorSize),
+			Pos: Uint32Field{
+				Meta:  metaFromOffset(descStart, 4),
+				Value: binary.LittleEndian.Uint32(descriptor[0:4]),
+			},
+			KeySize: Uint32Field{
+				Meta:  metaFromOffset(descStart+4, 4),
+				Value: binary.LittleEndian.Uint32(descriptor[4:8]),
+			},
+			PageID: PageIDField{
+				Meta:  metaFromOffset(descStart+8, 8),
+				Value: PageID(binary.LittleEndian.Uint64(descriptor[8:16])),
+			},
+		}
+
+		keyStart, keyEnd, err := payloadRange(page, descStart, element.Pos.Value, element.KeySize.Value)
+		if err != nil {
+			return payload, fmt.Errorf("branch element %d key: %w", idx, err)
+		}
+
+		kv := KeyValue{
+			Meta: metaFromOffset(keyStart, keyEnd-keyStart),
+			Key: Payload{
+				Meta: metaFromOffset(keyStart, keyEnd-keyStart),
+				Data: append([]byte(nil), page[keyStart:keyEnd]...),
+			},
+		}
+
+		payload.BranchElements = append(payload.BranchElements, element)
+		payload.KeyValue = append(payload.KeyValue, kv)
+		if keyEnd > maxEnd {
+			maxEnd = keyEnd
+		}
+	}
+	payload.Meta = metaFromOffset(start, maxEnd-start)
+
+	return payload, nil
+}
+
 func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 	const start = 16
 	const descriptorSize = 16
@@ -271,11 +340,11 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 			},
 		}
 
-		keyStart, keyEnd, err := leafPayloadRange(page, descStart, element.Pos.Value, element.KeySize.Value)
+		keyStart, keyEnd, err := payloadRange(page, descStart, element.Pos.Value, element.KeySize.Value)
 		if err != nil {
 			return payload, fmt.Errorf("leaf element %d key: %w", idx, err)
 		}
-		valueStart, valueEnd, err := leafPayloadRange(page, keyEnd, 0, element.ValueSize.Value)
+		valueStart, valueEnd, err := payloadRange(page, keyEnd, 0, element.ValueSize.Value)
 		if err != nil {
 			return payload, fmt.Errorf("leaf element %d value: %w", idx, err)
 		}
@@ -294,6 +363,13 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 
 		payload.LeafElements = append(payload.LeafElements, element)
 		payload.KeyValue = append(payload.KeyValue, kv)
+		if element.Flags.Value == BucketLeafFlag {
+			bucket, err := parseNestedBucket(kv.Value)
+			if err != nil {
+				return payload, fmt.Errorf("leaf element %d bucket header: %w", idx, err)
+			}
+			payload.NestedBucket = append(payload.NestedBucket, bucket)
+		}
 		if valueEnd > maxEnd {
 			maxEnd = valueEnd
 		}
@@ -304,7 +380,27 @@ func parseLeafPayload(page []byte, count uint16) (*LeafPayload, error) {
 	return payload, nil
 }
 
-func leafPayloadRange(page []byte, base int, relative uint32, size uint32) (int, int, error) {
+func parseNestedBucket(value Payload) (NestedBucket, error) {
+	const size = 16
+
+	bucket := NestedBucket{}
+	if len(value.Data) < size {
+		return bucket, fmt.Errorf("bucket header size is %d bytes, got %d bytes", size, len(value.Data))
+	}
+	start := value.Meta.StartOffset
+	bucket.Meta = metaFromOffset(start, size)
+	bucket.Root = PageIDField{
+		Meta:  metaFromOffset(start, 8),
+		Value: PageID(binary.LittleEndian.Uint64(value.Data[0:8])),
+	}
+	bucket.Sequence = Uint64Field{
+		Meta:  metaFromOffset(start+8, 8),
+		Value: binary.LittleEndian.Uint64(value.Data[8:16]),
+	}
+	return bucket, nil
+}
+
+func payloadRange(page []byte, base int, relative uint32, size uint32) (int, int, error) {
 	start := uint64(base) + uint64(relative)
 	end := start + uint64(size)
 	if start > uint64(len(page)) {
@@ -411,6 +507,15 @@ func (i *Inspector) InspectPage(id PageID) (*BTreePage, error) {
 		page.FreelistPayload, err = parseFreelistPayload(logical, page.Header.Count.Value)
 		if err != nil {
 			return page, fmt.Errorf("page %d freelist payload: %w", id, err)
+		}
+	case PageClassBranch:
+		logical, err := i.readLogicalPageBytes(id)
+		if err != nil {
+			return page, err
+		}
+		page.BranchPayload, err = parseBranchPayload(logical, page.Header.Count.Value)
+		if err != nil {
+			return page, fmt.Errorf("page %d branch payload: %w", id, err)
 		}
 	case PageClassLeaf:
 		logical, err := i.readLogicalPageBytes(id)

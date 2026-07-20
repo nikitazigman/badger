@@ -25,6 +25,8 @@ const (
 	drillChildSerialType       = "serial_type"
 	drillChildRecordValue      = "record_value"
 	drillChildOverflowPointer  = "overflow_pointer"
+	drillChildBranchEntry      = "branch_entry"
+	drillChildBranchDescriptor = "branch_descriptor"
 	drillChildLeafEntry        = "leaf_entry"
 	drillChildLeafDescriptor   = "leaf_descriptor"
 	drillChildLeafKey          = "leaf_key"

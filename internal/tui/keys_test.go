@@ -1269,6 +1269,38 @@ func TestBboltLeafStylesAreContrasting(t *testing.T) {
 	}
 }
 
+func TestBboltBranchStylesAreNotUnknown(t *testing.T) {
+	t.Parallel()
+
+	unknown := fmt.Sprint(unknownHexByteStyle.GetForeground())
+	topLevel := map[string]string{
+		"descriptors": fmt.Sprint(blockStyle(pageBlockBranchDescriptors).GetForeground()),
+		"descriptor":  fmt.Sprint(blockStyle(pageBlockBranchDescriptor).GetForeground()),
+		"entry":       fmt.Sprint(blockStyle(pageBlockBranchEntry).GetForeground()),
+	}
+	for name, color := range topLevel {
+		if color == unknown {
+			t.Fatalf("branch %s block uses unknown hex style %q", name, color)
+		}
+		if color == "" {
+			t.Fatalf("branch %s block has no foreground style", name)
+		}
+	}
+
+	drill := map[string]string{
+		"descriptor": fmt.Sprint(drillChildStyle(drillChildBranchDescriptor).GetForeground()),
+		"entry":      fmt.Sprint(drillChildStyle(drillChildBranchEntry).GetForeground()),
+	}
+	for name, color := range drill {
+		if color == unknown {
+			t.Fatalf("branch %s drill child uses unknown hex style %q", name, color)
+		}
+		if color == "" {
+			t.Fatalf("branch %s drill child has no foreground style", name)
+		}
+	}
+}
+
 func TestMetaPayloadBlockStyleIsNotUnknown(t *testing.T) {
 	t.Parallel()
 

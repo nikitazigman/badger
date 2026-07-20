@@ -1656,6 +1656,10 @@ func drillChildStyle(kind string) lipgloss.Style {
 		return recordValueHexByteStyle
 	case drillChildOverflowPointer:
 		return overflowPointerHexByteStyle
+	case drillChildBranchDescriptor:
+		return leafDescriptorHexByteStyle
+	case drillChildBranchEntry:
+		return cellHexByteStyle
 	case drillChildLeafDescriptor:
 		return leafDescriptorHexByteStyle
 	case drillChildLeafKey:
@@ -1679,6 +1683,10 @@ func blockStyle(kind string) lipgloss.Style {
 		return dbHeaderHexByteStyle
 	case pageBlockFreelistPayload:
 		return freelistHexByteStyle
+	case pageBlockBranchDescriptors, pageBlockBranchDescriptor:
+		return leafDescriptorHexByteStyle
+	case pageBlockBranchEntry:
+		return cellHexByteStyle
 	case pageBlockLeafDescriptors, pageBlockLeafDescriptor:
 		return leafDescriptorHexByteStyle
 	case pageBlockLeafKey:

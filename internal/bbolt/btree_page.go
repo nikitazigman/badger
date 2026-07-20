@@ -125,9 +125,9 @@ type BranchPayload struct {
 
 type BranchElement struct {
 	Meta    Meta
-	Pos     uint32
-	KeySize uint32
-	PageID  PageID
+	Pos     Uint32Field
+	KeySize Uint32Field
+	PageID  PageIDField
 }
 
 type KeyValue struct {
@@ -175,6 +175,13 @@ type NestedBucket struct {
 	Meta     Meta
 	Root     PageIDField // 0 for inline bucket
 	Sequence Uint64Field
+}
+
+type BucketEntry struct {
+	PageID       PageID
+	ElementIndex int
+	Key          Payload
+	Bucket       NestedBucket
 }
 
 type InlineBucket struct {

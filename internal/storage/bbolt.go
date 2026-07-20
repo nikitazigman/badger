@@ -1,21 +1,27 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/nikitazigman/badger/internal/bbolt"
 )
 
 const (
-	blockMetaPayload     = "meta_payload"
-	blockFreelistPayload = "freelist_payload"
-	blockFreelistID      = "freelist_id"
-	blockLeafDescriptors = "leaf_descriptors"
-	blockLeafEntry       = "leaf_entry"
-	blockLeafDescriptor  = "leaf_descriptor"
-	blockLeafKey         = "leaf_key"
-	blockLeafValue       = "leaf_value"
+	blockMetaPayload       = "meta_payload"
+	blockFreelistPayload   = "freelist_payload"
+	blockFreelistID        = "freelist_id"
+	blockBranchDescriptors = "branch_descriptors"
+	blockBranchEntry       = "branch_entry"
+	blockBranchDescriptor  = "branch_descriptor"
+	blockLeafDescriptors   = "leaf_descriptors"
+	blockLeafEntry         = "leaf_entry"
+	blockLeafDescriptor    = "leaf_descriptor"
+	blockLeafKey           = "leaf_key"
+	blockLeafValue         = "leaf_value"
 )
 
 type bboltDatabase struct {
@@ -61,6 +67,18 @@ func (db *bboltDatabase) Overview() (*DatabaseOverview, error) {
 			{Label: "High water mark", Value: strconv.FormatUint(uint64(config.HighWaterMark), 10)},
 		},
 	}
+	btrees := []BTreeItem{rootBucket}
+
+	bucketEntries, _, err := db.inspector.BucketEntries(config.Root)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(bucketEntries, func(a, b int) bool {
+		return bytes.Compare(bucketEntries[a].Key.Data, bucketEntries[b].Key.Data) < 0
+	})
+	for _, entry := range bucketEntries {
+		btrees = append(btrees, bboltBucketItem(entry))
+	}
 
 	overview := &DatabaseOverview{
 		Path:              db.path,
@@ -69,11 +87,14 @@ func (db *bboltDatabase) Overview() (*DatabaseOverview, error) {
 		FirstPageID:       0,
 		DatabaseSizeBytes: uint64(config.PageSize) * uint64(config.HighWaterMark),
 		HeaderRows:        bboltHeaderRows(config),
-		BTrees:            []BTreeItem{rootBucket},
+		BTrees:            btrees,
 		PageSummaries:     bboltPageSummaries(db.inspector.PageSummaries()),
 	}
 
-	db.btrees = map[BTreeID]BTreeItem{rootBucket.ID: rootBucket}
+	db.btrees = make(map[BTreeID]BTreeItem, len(btrees))
+	for _, item := range btrees {
+		db.btrees[item.ID] = item
+	}
 	db.overview = overview
 	return overview, nil
 }
@@ -99,7 +120,39 @@ func (db *bboltDatabase) PagesForBTree(id BTreeID) ([]PageRef, error) {
 	if item.RootPage == nil {
 		return []PageRef{}, nil
 	}
-	return []PageRef{*item.RootPage}, nil
+	walk, err := db.inspector.PagesForRoot(bbolt.PageID(item.RootPage.ID))
+	if err != nil {
+		return nil, err
+	}
+	pages := make([]PageRef, 0, len(walk.Pages))
+	for _, page := range walk.Pages {
+		pages = append(pages, PageRef{ID: uint64(page)})
+	}
+	return pages, nil
+}
+
+func bboltBucketItem(entry bbolt.BucketEntry) BTreeItem {
+	name := bboltBucketName(entry.Key.Data)
+	var root *PageRef
+	if entry.Bucket.Root.Value != 0 {
+		ref := PageRef{ID: uint64(entry.Bucket.Root.Value)}
+		root = &ref
+	}
+	return BTreeItem{
+		ID:       BTreeID("bucket:root/" + hex.EncodeToString(entry.Key.Data)),
+		Kind:     BTreeBucket,
+		Name:     name,
+		RootPage: root,
+		Rows: []Field{
+			{Label: "Type", Value: "bucket"},
+			{Label: "Name", Value: name},
+			{Label: "Key", Value: bboltKeyLabel(entry.Key.Data), Span: bboltSpanPtr(entry.Key.Meta)},
+			{Label: "Root page", Value: bboltBucketRootLabel(entry.Bucket.Root.Value), Span: bboltSpanPtr(entry.Bucket.Root.Meta)},
+			{Label: "Sequence", Value: strconv.FormatUint(entry.Bucket.Sequence.Value, 10), Span: bboltSpanPtr(entry.Bucket.Sequence.Meta)},
+			{Label: "Parent page", Value: strconv.FormatUint(uint64(entry.PageID), 10)},
+			{Label: "Entry index", Value: strconv.Itoa(entry.ElementIndex)},
+		},
+	}
 }
 
 func bboltHeaderRows(config bbolt.BboltConfig) []Field {
@@ -116,6 +169,13 @@ func bboltHeaderRows(config bbolt.BboltConfig) []Field {
 func bboltPageIDLabel(id bbolt.PageID) string {
 	if id == bbolt.PgidNoFreelist {
 		return "none"
+	}
+	return strconv.FormatUint(uint64(id), 10)
+}
+
+func bboltBucketRootLabel(id bbolt.PageID) string {
+	if id == 0 {
+		return "inline"
 	}
 	return strconv.FormatUint(uint64(id), 10)
 }
@@ -266,6 +326,11 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 		}
 		blocks = append(blocks, block)
 	}
+	if page.BranchPayload != nil {
+		branchRows, branchBlocks := adaptBboltBranchPage(page)
+		rows = append(rows, branchRows...)
+		blocks = append(blocks, branchBlocks...)
+	}
 	if page.LeafPayload != nil {
 		leafRows, leafBlocks := adaptBboltLeafPage(page)
 		rows = append(rows, leafRows...)
@@ -278,6 +343,99 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 		Rows:      rows,
 		HexBlocks: blocks,
 	}
+}
+
+func adaptBboltBranchPage(page *bbolt.BTreePage) ([]Field, []HexBlock) {
+	descriptorChildren := make([]HexBlock, 0, len(page.BranchPayload.BranchElements))
+	entryBlocks := make([]HexBlock, 0, len(page.BranchPayload.KeyValue))
+	rows := []Field{
+		Blank(),
+		Section("BRANCH"),
+		{Label: "Branch entries", Value: strconv.Itoa(len(page.BranchPayload.BranchElements))},
+	}
+
+	for idx, element := range page.BranchPayload.BranchElements {
+		if idx >= len(page.BranchPayload.KeyValue) {
+			break
+		}
+		kv := page.BranchPayload.KeyValue[idx]
+		rows = append(rows, Field{
+			Label: fmt.Sprintf("Entry %d", idx),
+			Value: fmt.Sprintf("key=%s child=%d", bboltKeyLabel(kv.Key.Data), element.PageID.Value),
+			Span:  bboltSpanPtr(element.Meta),
+		})
+
+		descriptorChildren = append(descriptorChildren, bboltBranchDescriptorBlock(idx, element))
+		entryBlocks = append(entryBlocks, bboltBranchEntryBlock(idx, element, kv))
+	}
+
+	blocks := []HexBlock{{
+		ID:       "branch-descriptors",
+		Kind:     blockBranchDescriptors,
+		Title:    "Branch Descriptors",
+		Span:     bboltBranchDescriptorsSpan(page.BranchPayload.BranchElements),
+		Children: descriptorChildren,
+		Rows: []Field{
+			{Label: "Branch Descriptors", Value: ""},
+			{Label: "Offset", Value: spanRange(bboltBranchDescriptorsSpan(page.BranchPayload.BranchElements))},
+			{Label: "Size", Value: byteCount(bboltBranchDescriptorsSpan(page.BranchPayload.BranchElements).Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Descriptors", Value: strconv.Itoa(len(page.BranchPayload.BranchElements))},
+		},
+	}}
+	blocks = append(blocks, entryBlocks...)
+	return rows, blocks
+}
+
+func bboltBranchEntryBlock(idx int, element bbolt.BranchElement, kv bbolt.KeyValue) HexBlock {
+	return HexBlock{
+		ID:    fmt.Sprintf("branch-entry-%d", idx),
+		Kind:  blockBranchEntry,
+		Title: fmt.Sprintf("Branch Entry %d", idx),
+		Span:  bboltSpanFromMeta(kv.Meta),
+		Rows: []Field{
+			{Label: fmt.Sprintf("Branch Entry %d", idx), Value: ""},
+			{Label: "Offset", Value: bboltOffsetRange(kv.Meta)},
+			{Label: "Size", Value: byteCount(kv.Meta.Size)},
+			Blank(),
+			Section("DESCRIPTOR"),
+			{Label: "Position", Value: strconv.FormatUint(uint64(element.Pos.Value), 10), Span: bboltSpanPtr(element.Pos.Meta)},
+			{Label: "Key size", Value: byteCount(int(element.KeySize.Value)), Span: bboltSpanPtr(element.KeySize.Meta)},
+			{Label: "Child page", Value: strconv.FormatUint(uint64(element.PageID.Value), 10), Span: bboltSpanPtr(element.PageID.Meta)},
+			Blank(),
+			Section("PAYLOAD"),
+			{Label: "Key", Value: bboltKeyLabel(kv.Key.Data), Span: bboltSpanPtr(kv.Key.Meta)},
+		},
+	}
+}
+
+func bboltBranchDescriptorBlock(idx int, element bbolt.BranchElement) HexBlock {
+	return HexBlock{
+		ID:    fmt.Sprintf("branch-entry-%d-descriptor", idx),
+		Kind:  blockBranchDescriptor,
+		Title: fmt.Sprintf("Branch Entry %d Descriptor", idx),
+		Span:  bboltSpanFromMeta(element.Meta),
+		Rows: []Field{
+			{Label: fmt.Sprintf("Branch Entry %d Descriptor", idx), Value: ""},
+			{Label: "Offset", Value: bboltOffsetRange(element.Meta)},
+			{Label: "Size", Value: byteCount(element.Meta.Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Position", Value: strconv.FormatUint(uint64(element.Pos.Value), 10), Span: bboltSpanPtr(element.Pos.Meta)},
+			{Label: "Key size", Value: byteCount(int(element.KeySize.Value)), Span: bboltSpanPtr(element.KeySize.Meta)},
+			{Label: "Child page", Value: strconv.FormatUint(uint64(element.PageID.Value), 10), Span: bboltSpanPtr(element.PageID.Meta)},
+		},
+	}
+}
+
+func bboltBranchDescriptorsSpan(elements []bbolt.BranchElement) ByteSpan {
+	if len(elements) == 0 {
+		return ByteSpan{Start: 16, Size: 0}
+	}
+	first := elements[0].Meta
+	last := elements[len(elements)-1].Meta
+	return ByteSpan{Start: first.StartOffset, Size: last.EndOffset() - first.StartOffset}
 }
 
 func adaptBboltLeafPage(page *bbolt.BTreePage) ([]Field, []HexBlock) {
@@ -437,6 +595,18 @@ func bboltKeyLabel(data []byte) string {
 	}
 	out = append(out, '"')
 	return string(out)
+}
+
+func bboltBucketName(data []byte) string {
+	if len(data) == 0 {
+		return `""`
+	}
+	for _, b := range data {
+		if b < 0x20 || b > 0x7e || b == '"' || b == '\\' {
+			return bboltKeyLabel(data)
+		}
+	}
+	return string(data)
 }
 
 func bboltPageSummaries(summaries []bbolt.PageSummary) []PageSummary {

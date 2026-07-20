@@ -2,6 +2,7 @@ package bbolt
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -35,10 +36,12 @@ func TestOpenReturnsConfigFromBoltFixtures(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "empty", path: fixturePath("empty", "empty.db")},
-		{name: "single bucket", path: fixturePath("single_bucket", "users.db")},
-		{name: "nested buckets", path: fixturePath("nested_buckets", "app.db")},
-		{name: "large values", path: fixturePath("large_values", "events.db")},
+		{name: "empty", path: fixturePath("empty.db")},
+		{name: "single bucket", path: fixturePath("users.db")},
+		{name: "many buckets", path: fixturePath("many_buckets.db")},
+		{name: "nested inline", path: fixturePath("nested_inline.db")},
+		{name: "overflow", path: fixturePath("overflow.db")},
+		{name: "branch pages", path: fixturePath("branch_pages.db")},
 	}
 
 	for _, tt := range tests {
@@ -97,7 +100,7 @@ func expectedBoltConfig(t *testing.T, path string) BboltConfig {
 func TestInspectPageReadsZeroBasedPhysicalPages(t *testing.T) {
 	t.Parallel()
 
-	inspector, err := Open(fixturePath("single_bucket", "users.db"))
+	inspector, err := Open(fixturePath("users.db"))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -134,7 +137,7 @@ func TestInspectPageReadsZeroBasedPhysicalPages(t *testing.T) {
 func TestInspectPageRecordsHeaderAndMetaSpans(t *testing.T) {
 	t.Parallel()
 
-	inspector, err := Open(fixturePath("single_bucket", "users.db"))
+	inspector, err := Open(fixturePath("users.db"))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -246,9 +249,10 @@ func TestInspectLeafPageParsesOrdinaryKeyValueEntriesFromFixtures(t *testing.T) 
 	t.Parallel()
 
 	for _, path := range []string{
-		fixturePath("single_bucket", "users.db"),
-		fixturePath("nested_buckets", "app.db"),
-		fixturePath("large_values", "events.db"),
+		fixturePath("users.db"),
+		fixturePath("nested_inline.db"),
+		fixturePath("overflow.db"),
+		fixturePath("branch_pages.db"),
 	} {
 		inspector, err := Open(path)
 		if err != nil {
@@ -306,7 +310,7 @@ func TestInspectLeafPageParsesOrdinaryKeyValueEntriesFromFixtures(t *testing.T) 
 func TestInspectLeafPageParsesBucketEntriesFromFixtures(t *testing.T) {
 	t.Parallel()
 
-	inspector, err := Open(fixturePath("single_bucket", "users.db"))
+	inspector, err := Open(fixturePath("users.db"))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -341,14 +345,248 @@ func TestInspectLeafPageParsesBucketEntriesFromFixtures(t *testing.T) {
 				t.Fatalf("bucket value span size = %d, value bytes = %d", kv.Value.Meta.Size, len(kv.Value.Data))
 			}
 			assertLeafElementDescriptorSpans(t, element)
-			if len(page.LeafPayload.NestedBucket) != 0 {
-				t.Fatal("task 04 should leave bucket values opaque; nested bucket headers belong to task 06")
+			if len(page.LeafPayload.NestedBucket) == 0 {
+				t.Fatal("bucket leaf page did not decode nested bucket header")
+			}
+			bucket := page.LeafPayload.NestedBucket[0]
+			assertMeta(t, bucket.Meta, kv.Value.Meta.StartOffset, 16)
+			assertMeta(t, bucket.Root.Meta, kv.Value.Meta.StartOffset, 8)
+			assertMeta(t, bucket.Sequence.Meta, kv.Value.Meta.StartOffset+8, 8)
+			if kv.Value.Meta.Size < bucket.Meta.Size {
+				t.Fatalf("bucket value span size = %d, want at least %d", kv.Value.Meta.Size, bucket.Meta.Size)
 			}
 			return
 		}
 	}
 
-	t.Fatal("single_bucket fixture did not contain a bucket leaf entry")
+	t.Fatal("users fixture did not contain a bucket leaf entry")
+}
+
+func TestGeneratedNestedInlineFixtureHasDepthAndInlineBuckets(t *testing.T) {
+	t.Parallel()
+
+	path := fixturePath("nested_inline.db")
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("bolt.Open fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close bolt db: %v", err)
+		}
+	})
+
+	if err := db.View(func(tx *bolt.Tx) error {
+		for _, rootName := range []string{"alpha", "beta", "gamma"} {
+			current := tx.Bucket([]byte(rootName))
+			if current == nil {
+				return fmt.Errorf("missing root bucket %q", rootName)
+			}
+			for depth := 1; depth <= 5; depth++ {
+				inline := current.Bucket([]byte(fmt.Sprintf("inline_%d", depth)))
+				if inline == nil {
+					return fmt.Errorf("%s depth %d missing inline bucket", rootName, depth)
+				}
+				if got := inline.Get([]byte("kind")); string(got) != "small_inline_bucket" {
+					return fmt.Errorf("%s inline_%d kind = %q", rootName, depth, got)
+				}
+				next := current.Bucket([]byte(fmt.Sprintf("level_%d", depth)))
+				if next == nil {
+					return fmt.Errorf("%s missing level_%d", rootName, depth)
+				}
+				current = next
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("nested_inline fixture shape: %v", err)
+	}
+
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	inlineBuckets := 0
+	config := inspector.Config()
+	for id := PageID(0); id < config.HighWaterMark; id++ {
+		page, err := inspector.InspectPage(id)
+		if err != nil {
+			t.Fatalf("InspectPage(%d) returned error: %v", id, err)
+		}
+		if page.LeafPayload == nil {
+			continue
+		}
+		for _, bucket := range page.LeafPayload.NestedBucket {
+			if bucket.Root.Value == 0 {
+				inlineBuckets++
+			}
+		}
+	}
+	if inlineBuckets == 0 {
+		t.Fatal("nested_inline fixture did not contain any inline bucket headers")
+	}
+}
+
+func TestGeneratedOverflowFixtureHasContinuationPages(t *testing.T) {
+	t.Parallel()
+
+	inspector, err := Open(fixturePath("overflow.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	continuations := 0
+	for _, summary := range inspector.PageSummaries() {
+		if summary.Classification == PageClassContinuation {
+			continuations++
+		}
+	}
+	if continuations == 0 {
+		t.Fatal("overflow fixture did not produce continuation pages")
+	}
+}
+
+func TestInspectBranchPageParsesBranchElements(t *testing.T) {
+	t.Parallel()
+
+	path := writeSyntheticBranchDB(t, []syntheticBranchElement{
+		{key: "a", child: 4},
+		{key: "z", child: 5},
+	})
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	page, err := inspector.InspectPage(3)
+	if err != nil {
+		t.Fatalf("InspectPage(branch) returned error: %v", err)
+	}
+	if page.BranchPayload == nil {
+		t.Fatal("branch page missing parsed branch payload")
+	}
+	if len(page.BranchPayload.BranchElements) != 2 {
+		t.Fatalf("branch element count = %d, want 2", len(page.BranchPayload.BranchElements))
+	}
+
+	first := page.BranchPayload.BranchElements[0]
+	assertBranchElementDescriptorSpans(t, first)
+	if first.PageID.Value != 4 {
+		t.Fatalf("first child page id = %d, want 4", first.PageID.Value)
+	}
+	kv := page.BranchPayload.KeyValue[0]
+	if string(kv.Key.Data) != "a" {
+		t.Fatalf("first branch key = %q, want a", kv.Key.Data)
+	}
+	if got := page.Raw[kv.Key.Meta.StartOffset:kv.Key.Meta.EndOffset()]; string(got) != "a" {
+		t.Fatalf("branch key span bytes = %q, parsed key = %q", got, kv.Key.Data)
+	}
+}
+
+func TestPagesForRootWalksBranchAndLeafPages(t *testing.T) {
+	t.Parallel()
+
+	path := writeSyntheticBranchDB(t, []syntheticBranchElement{
+		{key: "a", child: 4},
+		{key: "z", child: 5},
+	})
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	walk, err := inspector.PagesForRoot(3)
+	if err != nil {
+		t.Fatalf("PagesForRoot returned error: %v", err)
+	}
+	want := []PageID{3, 4, 5}
+	if !reflect.DeepEqual(walk.Pages, want) {
+		t.Fatalf("PagesForRoot pages = %v, want %v", walk.Pages, want)
+	}
+	if len(walk.Skipped) != 0 {
+		t.Fatalf("PagesForRoot skipped = %+v, want none", walk.Skipped)
+	}
+}
+
+func TestPagesForRootSkipsBadChildAndRecordsCycle(t *testing.T) {
+	t.Parallel()
+
+	path := writeSyntheticBranchDB(t, []syntheticBranchElement{
+		{key: "a", child: 4},
+		{key: "m", child: 99},
+		{key: "z", child: 3},
+	})
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	walk, err := inspector.PagesForRoot(3)
+	if err != nil {
+		t.Fatalf("PagesForRoot returned error: %v", err)
+	}
+	want := []PageID{3, 4}
+	if !reflect.DeepEqual(walk.Pages, want) {
+		t.Fatalf("PagesForRoot pages = %v, want %v", walk.Pages, want)
+	}
+	if len(walk.Skipped) != 2 {
+		t.Fatalf("PagesForRoot skipped = %+v, want 2 entries", walk.Skipped)
+	}
+	if walk.Skipped[0].Page != 99 || !strings.Contains(walk.Skipped[0].Reason, "out of range") {
+		t.Fatalf("first skipped child = %+v, want out-of-range page 99", walk.Skipped[0])
+	}
+	if walk.Skipped[1].Page != 3 || !strings.Contains(walk.Skipped[1].Reason, "already visited") {
+		t.Fatalf("second skipped child = %+v, want visited cycle page 3", walk.Skipped[1])
+	}
+}
+
+func TestPagesForRootRootZeroIsInlineObject(t *testing.T) {
+	t.Parallel()
+
+	path := writeSyntheticBranchDB(t, nil)
+	inspector, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	walk, err := inspector.PagesForRoot(0)
+	if err != nil {
+		t.Fatalf("PagesForRoot(0) returned error: %v", err)
+	}
+	if len(walk.Pages) != 0 || len(walk.Skipped) != 0 {
+		t.Fatalf("PagesForRoot(0) = %+v, want empty inline walk", walk)
+	}
 }
 
 func TestParseLeafPayloadRejectsDescriptorAndPayloadBounds(t *testing.T) {
@@ -388,7 +626,7 @@ func TestParseLeafPayloadRejectsDescriptorAndPayloadBounds(t *testing.T) {
 func TestReadMetaRejectsInvalidMagicUnsupportedVersionAndChecksum(t *testing.T) {
 	t.Parallel()
 
-	source, err := os.ReadFile(fixturePath("single_bucket", "users.db"))
+	source, err := os.ReadFile(fixturePath("users.db"))
 	if err != nil {
 		t.Fatalf("ReadFile fixture: %v", err)
 	}
@@ -468,6 +706,50 @@ func writeSyntheticFreelistDB(t *testing.T) string {
 	return path
 }
 
+type syntheticBranchElement struct {
+	key   string
+	child PageID
+}
+
+func writeSyntheticBranchDB(t *testing.T, elements []syntheticBranchElement) string {
+	t.Helper()
+
+	const pageSize = 4096
+	data := make([]byte, pageSize*6)
+	putPageHeader(data[0:pageSize], 0, MetaPageFlag, 0, 0)
+	putMetaPayload(data[0:pageSize], pageSize, 3, PgidNoFreelist, 6, 1)
+
+	root := data[3*pageSize : 4*pageSize]
+	putPageHeader(root, 3, BranchPageFlag, uint16(len(elements)), 0)
+	for idx, element := range elements {
+		putBranchElement(root, idx, element.key, element.child)
+		if element.child == 4 || element.child == 5 {
+			child := data[int(element.child)*pageSize : int(element.child+1)*pageSize]
+			putPageHeader(child, element.child, LeafPageFlag, 0, 0)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "branch.db")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile synthetic branch db: %v", err)
+	}
+	return path
+}
+
+func putBranchElement(page []byte, idx int, key string, child PageID) {
+	const descriptorStart = 16
+	const descriptorSize = 16
+	const keyStart = 128
+	const keyStride = 16
+
+	descStart := descriptorStart + idx*descriptorSize
+	keyOffset := keyStart + idx*keyStride
+	copy(page[keyOffset:keyOffset+len(key)], []byte(key))
+	binary.LittleEndian.PutUint32(page[descStart:descStart+4], uint32(keyOffset-descStart))
+	binary.LittleEndian.PutUint32(page[descStart+4:descStart+8], uint32(len(key)))
+	binary.LittleEndian.PutUint64(page[descStart+8:descStart+16], uint64(child))
+}
+
 func putPageHeader(page []byte, id PageID, flag FlagType, count uint16, overflow uint32) {
 	binary.LittleEndian.PutUint64(page[0:8], uint64(id))
 	binary.LittleEndian.PutUint16(page[8:10], uint16(flag))
@@ -504,7 +786,7 @@ func TestParsePageRejectsUnknownPageFlag(t *testing.T) {
 func TestInspectPageRejectsHighWaterMarkAndTruncatedPages(t *testing.T) {
 	t.Parallel()
 
-	source := fixturePath("single_bucket", "users.db")
+	source := fixturePath("users.db")
 	sourceInspector, err := Open(source)
 	if err != nil {
 		t.Fatalf("Open source returned error: %v", err)
@@ -614,4 +896,13 @@ func assertLeafElementDescriptorSpans(t *testing.T, element LeafElement) {
 	assertMeta(t, element.Pos.Meta, element.Meta.StartOffset+4, 4)
 	assertMeta(t, element.KeySize.Meta, element.Meta.StartOffset+8, 4)
 	assertMeta(t, element.ValueSize.Meta, element.Meta.StartOffset+12, 4)
+}
+
+func assertBranchElementDescriptorSpans(t *testing.T, element BranchElement) {
+	t.Helper()
+
+	assertMeta(t, element.Meta, element.Meta.StartOffset, 16)
+	assertMeta(t, element.Pos.Meta, element.Meta.StartOffset, 4)
+	assertMeta(t, element.KeySize.Meta, element.Meta.StartOffset+4, 4)
+	assertMeta(t, element.PageID.Meta, element.Meta.StartOffset+8, 8)
 }

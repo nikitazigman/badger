@@ -99,7 +99,7 @@ func TestSQLiteInspectPageAndPagesForBTree(t *testing.T) {
 func TestOpenBboltOverview(t *testing.T) {
 	t.Parallel()
 
-	db, err := Open(fixturePath(filepath.Join("bbolt", "single_bucket", "users.db")))
+	db, err := Open(fixturePath(filepath.Join("bbolt", "users.db")))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -140,12 +140,28 @@ func TestOpenBboltOverview(t *testing.T) {
 	if root.RootPage == nil {
 		t.Fatal("root bucket has nil root page")
 	}
+	users := btreeByName(overview.BTrees, "users")
+	if users == nil {
+		t.Fatal("Overview missing users top-level bucket b-tree item")
+	}
+	if users.Kind != BTreeBucket {
+		t.Fatalf("users kind = %q, want %q", users.Kind, BTreeBucket)
+	}
+	if users.ID == "" {
+		t.Fatal("users bucket has empty stable id")
+	}
+	if testFieldValue(users.Rows, "Key") == "" {
+		t.Fatal("users bucket row missing key metadata")
+	}
+	if testFieldValue(users.Rows, "Root page") == "" {
+		t.Fatal("users bucket row missing root page metadata")
+	}
 }
 
 func TestOpenBboltNestedBucketsFixture(t *testing.T) {
 	t.Parallel()
 
-	db, err := Open(fixturePath(filepath.Join("bbolt", "nested_buckets", "app.db")))
+	db, err := Open(fixturePath(filepath.Join("bbolt", "nested_inline.db")))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -163,10 +179,34 @@ func TestOpenBboltNestedBucketsFixture(t *testing.T) {
 	}
 }
 
+func TestOpenBboltManyBucketsFixtureExposesMoreThan15Buckets(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(fixturePath(filepath.Join("bbolt", "many_buckets.db")))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview returned error: %v", err)
+	}
+	topLevelBuckets := 0
+	for _, item := range overview.BTrees {
+		if item.Kind == BTreeBucket && item.Name != "root" {
+			topLevelBuckets++
+		}
+	}
+	if topLevelBuckets <= 15 {
+		t.Fatalf("top-level bucket count = %d, want > 15", topLevelBuckets)
+	}
+}
+
 func TestOpenBboltDetectsByMetaNotExtension(t *testing.T) {
 	t.Parallel()
 
-	source := fixturePath(filepath.Join("bbolt", "single_bucket", "users.db"))
+	source := fixturePath(filepath.Join("bbolt", "users.db"))
 	data, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatalf("ReadFile fixture: %v", err)
@@ -190,7 +230,7 @@ func TestOpenBboltDetectsByMetaNotExtension(t *testing.T) {
 func TestBboltInspectPageAndPagesForBTree(t *testing.T) {
 	t.Parallel()
 
-	db, err := Open(fixturePath(filepath.Join("bbolt", "single_bucket", "users.db")))
+	db, err := Open(fixturePath(filepath.Join("bbolt", "users.db")))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -238,7 +278,7 @@ func TestBboltInspectPageAndPagesForBTree(t *testing.T) {
 func TestBboltMetaPageInspectionExposesHeaderAndMetaBlocks(t *testing.T) {
 	t.Parallel()
 
-	db, err := Open(fixturePath(filepath.Join("bbolt", "single_bucket", "users.db")))
+	db, err := Open(fixturePath(filepath.Join("bbolt", "users.db")))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -297,7 +337,7 @@ func TestBboltPageSummariesFreelistAndFreePageRows(t *testing.T) {
 	}
 	assertPageSummary(t, overview.PageSummaries, 0, PageClassMeta)
 	assertPageSummary(t, overview.PageSummaries, 2, PageClassFreelist)
-	assertPageSummary(t, overview.PageSummaries, 3, PageClassUnknown)
+	assertPageSummary(t, overview.PageSummaries, 3, PageClassLeaf)
 	assertPageSummary(t, overview.PageSummaries, 4, PageClassFree)
 
 	freelist, err := db.InspectPage(PageRef{ID: 2})
@@ -338,8 +378,8 @@ func TestBboltLeafPageInspectionExposesLeafRowsAndBlocks(t *testing.T) {
 	t.Parallel()
 
 	bucketPage, bucketEntry := findBboltLeafEntryInspection(t, []string{
-		filepath.Join("bbolt", "single_bucket", "users.db"),
-		filepath.Join("bbolt", "nested_buckets", "app.db"),
+		filepath.Join("bbolt", "users.db"),
+		filepath.Join("bbolt", "nested_inline.db"),
 	}, "bucket")
 	if testFieldValue(bucketPage.Rows, "Leaf entries") == "" {
 		t.Fatal("bucket leaf page rows missing Leaf entries")
@@ -351,15 +391,71 @@ func TestBboltLeafPageInspectionExposesLeafRowsAndBlocks(t *testing.T) {
 	assertLeafEntryStorageBlocks(t, bucketEntry, true)
 
 	ordinaryPage, ordinaryEntry := findBboltLeafEntryInspection(t, []string{
-		filepath.Join("bbolt", "single_bucket", "users.db"),
-		filepath.Join("bbolt", "nested_buckets", "app.db"),
-		filepath.Join("bbolt", "large_values", "events.db"),
+		filepath.Join("bbolt", "users.db"),
+		filepath.Join("bbolt", "nested_inline.db"),
+		filepath.Join("bbolt", "overflow.db"),
+		filepath.Join("bbolt", "branch_pages.db"),
 	}, "key/value")
 	if testFieldValue(ordinaryPage.Rows, "Leaf entries") == "" {
 		t.Fatal("ordinary leaf page rows missing Leaf entries")
 	}
 	assertLeafDescriptorStorageBlock(t, ordinaryPage)
 	assertLeafEntryStorageBlocks(t, ordinaryEntry, false)
+}
+
+func TestBboltBranchPageInspectionExposesBranchRowsAndBlocks(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(fixturePath(filepath.Join("bbolt", "branch_pages.db")))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview returned error: %v", err)
+	}
+	for _, summary := range overview.PageSummaries {
+		if summary.Classification != PageClassBranch {
+			continue
+		}
+		page, err := db.InspectPage(summary.Ref)
+		if err != nil {
+			t.Fatalf("InspectPage(branch %d) returned error: %v", summary.Ref.ID, err)
+		}
+		if testFieldValue(page.Rows, "Branch entries") == "" {
+			t.Fatal("branch page rows missing Branch entries")
+		}
+		descriptors := testHexBlockByKind(page.HexBlocks, blockBranchDescriptors)
+		if descriptors == nil {
+			t.Fatal("branch page missing descriptor list block")
+		}
+		if len(descriptors.Children) == 0 {
+			t.Fatal("branch descriptor list has no descriptor children")
+		}
+		descriptor := descriptors.Children[0]
+		assertByteSpan(t, descriptor.Span, descriptor.Span.Start, 16)
+		assertFieldSpan(t, descriptor.Rows, "Position", descriptor.Span.Start, 4)
+		assertFieldSpan(t, descriptor.Rows, "Key size", descriptor.Span.Start+4, 4)
+		assertFieldSpan(t, descriptor.Rows, "Child page", descriptor.Span.Start+8, 8)
+
+		entry := testHexBlockByKind(page.HexBlocks, blockBranchEntry)
+		if entry == nil {
+			t.Fatal("branch page missing branch entry block")
+		}
+		if testFieldValue(entry.Rows, "Child page") == "" {
+			t.Fatal("branch entry rows missing child page")
+		}
+		if testFieldValue(entry.Rows, "Key") == "" {
+			t.Fatal("branch entry rows missing key representation")
+		}
+		if len(entry.Children) != 0 {
+			t.Fatalf("branch entry exposes %d drill children, want none", len(entry.Children))
+		}
+		return
+	}
+	t.Fatal("branch_pages fixture did not contain a branch page")
 }
 
 func TestOpenUnsupportedEngine(t *testing.T) {
@@ -520,6 +616,7 @@ func writeSyntheticBboltFreelistDB(t *testing.T) string {
 	putSyntheticBboltMetaPayload(data[0:pageSize], pageSize, 3, 2, 5, 1)
 	putSyntheticBboltPageHeader(data[2*pageSize:3*pageSize], 2, bbolt.FreelistPageFlag, 1, 0)
 	binary.LittleEndian.PutUint64(data[2*pageSize+16:2*pageSize+24], 4)
+	putSyntheticBboltPageHeader(data[3*pageSize:4*pageSize], 3, bbolt.LeafPageFlag, 0, 0)
 	putSyntheticBboltPageHeader(data[4*pageSize:5*pageSize], 4, bbolt.LeafPageFlag, 0, 0)
 
 	path := filepath.Join(t.TempDir(), "freelist.db")
