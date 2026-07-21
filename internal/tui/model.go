@@ -53,6 +53,7 @@ type contentTarget struct {
 	kind       navKind
 	pageNumber uint64
 	schemaName string
+	schemaID   storage.BTreeID
 }
 
 type pageMetaSource int
@@ -94,6 +95,7 @@ type model struct {
 	indexPending    int
 	indexTotal      int
 	activeFilter    *filterSource // nil = unfiltered
+	pendingG        bool
 }
 
 func newModel(database storage.Database, overview *storage.DatabaseOverview) (model, error) {
@@ -276,20 +278,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+	if m.pendingG {
+		m.pendingG = false
+		switch key {
+		case "g":
+			return m.jumpActiveListBoundary(true)
+		case "e":
+			return m.jumpActiveListBoundary(false)
+		}
+	}
+
+	switch key {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "U":
 		m.focusedPane = navPane
-		m.selectFirstBTreeRow() // first navTable, else first navIndex
-		if item := m.selectedItem(); item.kind == navTable || item.kind == navIndex {
+		if m.selectBTreeRowForPaneReturn() {
 			return m.activateSelected()
 		}
 		return m, nil
 	case "I":
 		m.focusedPane = navPane
-		m.selectFirstKind(navPage) // first PAGES row (was `p`)
-		if m.selectedItem().kind == navPage {
+		if m.selectPageRowForPaneReturn() {
 			return m.activateSelected()
 		}
 		return m, nil
@@ -329,8 +340,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "d":
-		if m.active.kind == navPage {
+		if m.focusedPane == navPane {
+			if m.selectedIndexHasKind(navPage) && m.moveSelectionWithinSection(10) {
+				return m.activateSelected()
+			}
+		} else if m.active.kind == navPage {
 			m.drillIn()
+		}
+		return m, nil
+	case "u":
+		if m.focusedPane == navPane && m.selectedIndexHasKind(navPage) {
+			if m.moveSelectionWithinSection(-10) {
+				return m.activateSelected()
+			}
 		}
 		return m, nil
 	case "b":
@@ -377,6 +399,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollInspector(1, 1)
 		}
 		return m, nil
+	case "g":
+		m.pendingG = true
+		return m, nil
 	case "pgup":
 		if m.focusedPane == explorerPane && m.active.kind == navPage {
 			m.scrollHex(-1, 8)
@@ -412,6 +437,61 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) jumpActiveListBoundary(first bool) (tea.Model, tea.Cmd) {
+	if m.focusedPane != navPane {
+		return m, nil
+	}
+
+	var match func(navItem) bool
+	emptyStatus := ""
+	switch {
+	case m.selectedIndexHasBTree():
+		match = isBTreeNavItem
+		emptyStatus = "no b-trees in current b-tree list"
+	case m.selectedIndexHasKind(navPage):
+		match = func(item navItem) bool { return item.kind == navPage }
+		emptyStatus = "no pages in current page list"
+	case m.active.kind == navTable || m.active.kind == navIndex:
+		match = isBTreeNavItem
+		emptyStatus = "no b-trees in current b-tree list"
+	case m.active.kind == navPage:
+		match = func(item navItem) bool { return item.kind == navPage }
+		emptyStatus = "no pages in current page list"
+	case isBTreeNavItem(m.selectedItem()):
+		match = isBTreeNavItem
+		emptyStatus = "no b-trees in current b-tree list"
+	case m.selectedItem().kind == navPage:
+		match = func(item navItem) bool { return item.kind == navPage }
+		emptyStatus = "no pages in current page list"
+	default:
+		return m, nil
+	}
+
+	idx, ok := m.boundaryIndexMatching(match, first)
+	if !ok {
+		m.status = emptyStatus
+		return m, nil
+	}
+	m.selectNavIndex(idx)
+	return m.activateSelected()
+}
+
+func (m model) boundaryIndexMatching(match func(navItem) bool, first bool) (int, bool) {
+	found := false
+	result := 0
+	for idx, item := range m.navItems {
+		if !match(item) {
+			continue
+		}
+		if first {
+			return idx, true
+		}
+		found = true
+		result = idx
+	}
+	return result, found
+}
+
 func (m *model) moveSelection(delta int) bool {
 	next := m.selectedIndex + delta
 	if next < 0 || next >= len(m.navItems) {
@@ -424,6 +504,41 @@ func (m *model) moveSelection(delta int) bool {
 	m.selectedIndex = next
 	m.inspectorScroll = 0
 	return true
+}
+
+func (m *model) moveSelectionWithinSection(delta int) bool {
+	if m.selectedIndex < 0 || m.selectedIndex >= len(m.navItems) {
+		return false
+	}
+	section := sectionForNavItem(m.navItems[m.selectedIndex])
+	first, last, ok := m.sectionBounds(section)
+	if !ok {
+		return false
+	}
+	next := clamp(m.selectedIndex+delta, first, last)
+	if next == m.selectedIndex {
+		return false
+	}
+	m.selectedIndex = next
+	m.inspectorScroll = 0
+	return true
+}
+
+func (m model) sectionBounds(section string) (int, int, bool) {
+	first := 0
+	last := 0
+	found := false
+	for idx, item := range m.navItems {
+		if sectionForNavItem(item) != section {
+			continue
+		}
+		if !found {
+			first = idx
+		}
+		last = idx
+		found = true
+	}
+	return first, last, found
 }
 
 func (m *model) selectFirstKind(kind navKind) bool {
@@ -440,11 +555,129 @@ func (m *model) selectFirstKind(kind navKind) bool {
 	return false
 }
 
+func (m *model) selectPageRowForPaneReturn() bool {
+	if m.selectedIndexHasKind(navPage) {
+		return true
+	}
+	if m.active.kind == navPage {
+		if idx, ok := m.indexOfPageRow(m.active.pageNumber); ok {
+			m.selectNavIndex(idx)
+			return true
+		}
+		if idx, ok := m.nearestPageRow(m.active.pageNumber); ok {
+			m.selectNavIndex(idx)
+			return true
+		}
+	}
+	if idx, ok := m.firstIndexMatching(func(item navItem) bool { return item.kind == navPage }); ok {
+		m.selectNavIndex(idx)
+		return true
+	}
+	m.status = "no pages in current page list"
+	return false
+}
+
+func (m *model) selectBTreeRowForPaneReturn() bool {
+	if m.selectedIndexHasBTree() {
+		return true
+	}
+	if idx, ok := m.indexOfActiveBTreeRow(); ok {
+		m.selectNavIndex(idx)
+		return true
+	}
+	if idx, ok := m.firstIndexMatching(func(item navItem) bool { return isBTreeNavItem(item) }); ok {
+		m.selectNavIndex(idx)
+		return true
+	}
+	m.status = "no b-trees in current b-tree list"
+	return false
+}
+
+func (m model) selectedIndexHasKind(kind navKind) bool {
+	return m.selectedIndex >= 0 && m.selectedIndex < len(m.navItems) && m.navItems[m.selectedIndex].kind == kind
+}
+
+func (m model) selectedIndexHasBTree() bool {
+	return m.selectedIndex >= 0 && m.selectedIndex < len(m.navItems) && isBTreeNavItem(m.navItems[m.selectedIndex])
+}
+
+func (m *model) selectNavIndex(idx int) {
+	if m.selectedIndex == idx {
+		return
+	}
+	m.selectedIndex = idx
+	m.inspectorScroll = 0
+}
+
+func (m model) firstIndexMatching(match func(navItem) bool) (int, bool) {
+	for idx, item := range m.navItems {
+		if match(item) {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func (m model) indexOfPageRow(pageNumber uint64) (int, bool) {
+	for idx, item := range m.navItems {
+		if item.kind == navPage && item.pageNumber == pageNumber {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func (m model) nearestPageRow(pageNumber uint64) (int, bool) {
+	bestIndex := 0
+	var bestDistance uint64
+	found := false
+	for idx, item := range m.navItems {
+		if item.kind != navPage {
+			continue
+		}
+		distance := pageDistance(item.pageNumber, pageNumber)
+		if !found || distance < bestDistance || (distance == bestDistance && item.pageNumber < m.navItems[bestIndex].pageNumber) {
+			bestIndex = idx
+			bestDistance = distance
+			found = true
+		}
+	}
+	return bestIndex, found
+}
+
+func pageDistance(a uint64, b uint64) uint64 {
+	if a > b {
+		return a - b
+	}
+	return b - a
+}
+
+func (m model) indexOfActiveBTreeRow() (int, bool) {
+	if m.active.kind == navPage && m.activeFilter != nil {
+		return indexOfBTreeRowOK(m.navItems, m.activeFilter.object)
+	}
+	if m.active.kind != navTable && m.active.kind != navIndex {
+		return 0, false
+	}
+	for idx, item := range m.navItems {
+		if item.kind != m.active.kind || item.schema == nil {
+			continue
+		}
+		if m.active.schemaID != "" && item.schema.ID == m.active.schemaID {
+			return idx, true
+		}
+		if m.active.schemaID == "" && item.schema.Name == m.active.schemaName {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
 // selectFirstBTreeRow jumps to the first row of the merged B-TREES section: the first
 // table, or the first index when the database has no tables.
 func (m *model) selectFirstBTreeRow() bool {
 	for idx, item := range m.navItems {
-		if item.kind == navTable || item.kind == navIndex {
+		if isBTreeNavItem(item) {
 			if m.selectedIndex == idx {
 				return false
 			}
@@ -745,6 +978,7 @@ func (m model) activateSelected() (tea.Model, tea.Cmd) {
 	case navTable, navIndex:
 		if item.schema != nil {
 			m.active.schemaName = item.schema.Name
+			m.active.schemaID = item.schema.ID
 			m.status = fmt.Sprintf("opened %s %s", item.schema.Type, item.schema.Name)
 		}
 		m.currentPage = nil
@@ -856,6 +1090,9 @@ func pagePaneWidths(availableWidth int, navWidth int, explorerWidth int, inspect
 // it is the latest transient status, if any.
 func (m model) footerLine() string {
 	keys := m.footerKeyHints()
+	if m.status != "" && strings.HasPrefix(m.status, "no ") {
+		return m.status + "  |  " + keys
+	}
 	if m.isFiltered() {
 		return m.filterToken() + "  |  " + keys
 	}
@@ -885,6 +1122,9 @@ func (m model) footerKeyHints() string {
 }
 
 func (m model) canDrillIn() bool {
+	if m.focusedPane == navPane {
+		return false
+	}
 	if m.active.kind != navPage {
 		return false
 	}
@@ -1890,6 +2130,7 @@ func initialContentTarget(items []navItem) contentTarget {
 	target := contentTarget{kind: item.kind, pageNumber: item.pageNumber}
 	if item.schema != nil {
 		target.schemaName = item.schema.Name
+		target.schemaID = item.schema.ID
 	}
 	return target
 }
@@ -1920,21 +2161,33 @@ func objectIcon(obj schemaObjectViewModel) string {
 
 // indexOfBTreeRow returns the nav index of the B-TREES row for obj, or 0 if absent.
 func indexOfBTreeRow(items []navItem, obj schemaObjectViewModel) int {
+	idx, ok := indexOfBTreeRowOK(items, obj)
+	if !ok {
+		return 0
+	}
+	return idx
+}
+
+func indexOfBTreeRowOK(items []navItem, obj schemaObjectViewModel) (int, bool) {
 	for idx, item := range items {
-		if item.kind != navTable && item.kind != navIndex {
+		if !isBTreeNavItem(item) {
 			continue
 		}
 		if item.schema == nil {
 			continue
 		}
 		if obj.ID != "" && item.schema.ID == obj.ID {
-			return idx
+			return idx, true
 		}
 		if obj.ID == "" && item.schema.Name == obj.Name && item.schema.RootPage == obj.RootPage {
-			return idx
+			return idx, true
 		}
 	}
-	return 0
+	return 0, false
+}
+
+func isBTreeNavItem(item navItem) bool {
+	return item.kind == navTable || item.kind == navIndex
 }
 
 // collectBTreeRoots returns unique storage object IDs that can produce a page set. A

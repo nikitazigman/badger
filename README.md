@@ -136,18 +136,21 @@ Keybindings:
 | Key | Action |
 | --- | --- |
 | `up` / `down`, `k` / `j` | Move within the focused pane |
-| `U` | Focus `[U] B-TREES`, jump to the first b-tree row, and open it |
-| `I` | Focus `[I] PAGES`, jump to the first page row, and load it |
+| `U` | Focus `[U] B-TREES`, preserving the current b-tree row when possible, and open it |
+| `I` | Focus `[I] PAGES`, preserving the current page row when possible, and load it |
 | `O` | Focus `[O] Detail` / `[O] HEX` |
 | `P` | Focus `[P] Meta` |
 | `enter` | Open the selected row when `[U] B-TREES` or `[I] PAGES` is focused |
-| `d` | Drill into the selected page block or drill child when available |
+| `gg` | Jump to the first visible row in the active `[U] B-TREES` or `[I] PAGES` list |
+| `ge` | Jump to the last visible row in the active `[U] B-TREES` or `[I] PAGES` list |
+| `u` | Move up 10 rows in `[I] PAGES` and load the selected page |
+| `d` | Move down 10 rows in `[I] PAGES`; drill into the selected page block or drill child when `[O] HEX` or `[P] META` is focused |
 | `b` | Back out of the current drill layer |
 | `f` | Filter pages to the selected storage object; clear it on the active source row |
 | `esc` | Clear the active filter; when unfiltered, reset page sub-selection/loading state |
 | `q` | Quit |
 
-Use uppercase `U`, `I`, `O`, and `P` to choose the active view. The `U` and `I` jumps move the navigation cursor between sections and open the selected row. The `O` and `P` jumps only change pane focus; they do not change the selected navigation row or active filter. Navigation arrows are confined to the current section, so use the pane jumps to move between `B-TREES` and `PAGES`.
+Use uppercase `U`, `I`, `O`, and `P` to choose the active view. The `U` and `I` jumps move the navigation cursor between sections, preserve the current b-tree or page selection when it is still visible, and open the selected row. The `O` and `P` jumps only change pane focus; they do not change the selected navigation row or active filter. Navigation arrows are confined to the current section, so use the pane jumps to move between `B-TREES` and `PAGES`.
 
 ## What You Can Explore Today
 

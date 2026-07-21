@@ -117,6 +117,227 @@ func TestPaneJumpsAutoActivate(t *testing.T) {
 	}
 }
 
+func TestPagePaneReturnPreservesSelectedPage(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	pageIndex, ok := m.indexOfPageRow(3)
+	if !ok {
+		t.Fatal("setup: page 3 row not found")
+	}
+	m.selectedIndex = pageIndex
+	next, cmd := m.activateSelected()
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	for _, key := range []string{"O", "P"} {
+		next, _ = loaded.Update(keyMsg(key))
+		away := next.(model)
+		next, cmd = away.Update(keyMsg("I"))
+		got := next.(model)
+		if cmd == nil {
+			t.Fatalf("I after %s returned nil cmd, want page load", key)
+		}
+		if got.focusedPane != navPane {
+			t.Fatalf("I after %s focused pane = %v, want navPane", key, got.focusedPane)
+		}
+		if got.selectedIndex != pageIndex {
+			t.Fatalf("I after %s selected index %d, want original page index %d", key, got.selectedIndex, pageIndex)
+		}
+		if got.active.kind != navPage || got.active.pageNumber != 3 {
+			t.Fatalf("I after %s active = %+v, want page 3", key, got.active)
+		}
+	}
+}
+
+func TestPagePaneReturnReselectsActivePageFromOtherSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+
+	pageIndex, ok := m.indexOfPageRow(4)
+	if !ok {
+		t.Fatal("setup: page 4 row not found")
+	}
+	m.selectedIndex = pageIndex
+	next, cmd := m.activateSelected()
+	activePage := next.(model)
+	next, _ = activePage.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+
+	loaded.selectedIndex = loaded.indexOfFirstBTree()
+	loaded.focusedPane = inspectorPane
+	next, cmd = loaded.Update(keyMsg("I"))
+	got := next.(model)
+	if cmd == nil {
+		t.Fatal("I did not load the reselected active page")
+	}
+	if got.selectedIndex != pageIndex {
+		t.Fatalf("I selected index %d, want active page index %d", got.selectedIndex, pageIndex)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != 4 {
+		t.Fatalf("I active = %+v, want page 4", got.active)
+	}
+}
+
+func TestBTreePaneReturnPreservesSelectedBTree(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	obj := objectByName(t, m.db, "idx_companies_country")
+	btreeIndex := indexOfBTreeRow(m.navItems, obj)
+
+	m.selectedIndex = btreeIndex
+	next, cmd := m.activateSelected()
+	if cmd != nil {
+		t.Fatal("setup: b-tree activation returned a command")
+	}
+	opened := next.(model)
+
+	for _, key := range []string{"O", "P"} {
+		next, _ = opened.Update(keyMsg(key))
+		away := next.(model)
+		next, cmd = away.Update(keyMsg("U"))
+		got := next.(model)
+		if cmd != nil {
+			t.Fatalf("U after %s returned cmd %v, want nil", key, cmd)
+		}
+		if got.focusedPane != navPane {
+			t.Fatalf("U after %s focused pane = %v, want navPane", key, got.focusedPane)
+		}
+		if got.selectedIndex != btreeIndex {
+			t.Fatalf("U after %s selected index %d, want original b-tree index %d", key, got.selectedIndex, btreeIndex)
+		}
+		if got.active.kind != navIndex || got.active.schemaID != obj.ID {
+			t.Fatalf("U after %s active = %+v, want b-tree %s", key, got.active, obj.ID)
+		}
+	}
+}
+
+func TestBTreePaneReturnReselectsActiveBTreeFromPageSelection(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	obj := objectByName(t, m.db, "companies")
+	btreeIndex := indexOfBTreeRow(m.navItems, obj)
+
+	m.selectedIndex = btreeIndex
+	next, cmd := m.activateSelected()
+	if cmd != nil {
+		t.Fatal("setup: b-tree activation returned a command")
+	}
+	opened := next.(model)
+	if !opened.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	opened.focusedPane = inspectorPane
+
+	next, cmd = opened.Update(keyMsg("U"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("U returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != btreeIndex {
+		t.Fatalf("U selected index %d, want active b-tree index %d", got.selectedIndex, btreeIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != obj.ID {
+		t.Fatalf("U active = %+v, want b-tree %s", got.active, obj.ID)
+	}
+}
+
+func TestBTreePaneReturnReselectsFilterSourceForActivePage(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+
+	pageIndex := firstIndexOfKind(m.navItems, navPage)
+	if pageIndex < 0 {
+		t.Fatal("setup: filtered page rows not found")
+	}
+	m.selectedIndex = pageIndex
+	next, cmd := m.activateSelected()
+	loading := next.(model)
+	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
+	loaded := next.(model)
+	loaded.focusedPane = inspectorPane
+
+	next, cmd = loaded.Update(keyMsg("U"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("U returned cmd %v, want nil", cmd)
+	}
+	if want := indexOfBTreeRow(got.navItems, companies); got.selectedIndex != want {
+		t.Fatalf("U selected index %d, want filter source index %d", got.selectedIndex, want)
+	}
+	if got.active.kind != navTable || got.active.schemaID != companies.ID {
+		t.Fatalf("U active = %+v, want filter source %s", got.active, companies.ID)
+	}
+}
+
+func TestPaneReturnFallsBackAndHandlesEmptyLists(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+	m.navItems = buildNavItems(m.db, m.activeFilter, []storage.PageRef{{ID: 2}, {ID: 7}})
+	m.active = contentTarget{kind: navPage, pageNumber: 5}
+	m.selectedIndex = indexOfBTreeRow(m.navItems, companies)
+
+	next, cmd := m.Update(keyMsg("I"))
+	got := next.(model)
+	if cmd == nil {
+		t.Fatal("I did not load the nearest fallback page")
+	}
+	if got.selectedItem().kind != navPage || got.selectedItem().pageNumber != 7 {
+		t.Fatalf("I fallback selected %+v, want page 7", got.selectedItem())
+	}
+
+	emptyPages := got
+	emptyPages.navItems = buildNavItems(emptyPages.db, emptyPages.activeFilter, nil)
+	emptyPages.active = contentTarget{kind: navPage, pageNumber: 5}
+	emptyPages.selectedIndex = indexOfBTreeRow(emptyPages.navItems, companies)
+	next, cmd = emptyPages.Update(keyMsg("I"))
+	noPages := next.(model)
+	if cmd != nil {
+		t.Fatalf("I on empty pages returned cmd %v, want nil", cmd)
+	}
+	if noPages.selectedIndex != emptyPages.selectedIndex {
+		t.Fatalf("I on empty pages moved selection from %d to %d", emptyPages.selectedIndex, noPages.selectedIndex)
+	}
+	if !strings.Contains(noPages.footerLine(), "no pages in current page list") {
+		t.Fatalf("I on empty pages footer = %q", noPages.footerLine())
+	}
+
+	emptyBTrees := model{
+		navItems:      []navItem{{kind: navPage, title: "page 1", pageNumber: 1}},
+		selectedIndex: 0,
+		active:        contentTarget{kind: navTable, schemaName: "missing", schemaID: "table:missing"},
+		focusedPane:   inspectorPane,
+	}
+	next, cmd = emptyBTrees.Update(keyMsg("U"))
+	noBTrees := next.(model)
+	if cmd != nil {
+		t.Fatalf("U on empty b-trees returned cmd %v, want nil", cmd)
+	}
+	if noBTrees.selectedIndex != emptyBTrees.selectedIndex {
+		t.Fatalf("U on empty b-trees moved selection from %d to %d", emptyBTrees.selectedIndex, noBTrees.selectedIndex)
+	}
+	if !strings.Contains(noBTrees.footerLine(), "no b-trees in current b-tree list") {
+		t.Fatalf("U on empty b-trees footer = %q", noBTrees.footerLine())
+	}
+}
+
 func TestJumpBTreesFallsBackToIndex(t *testing.T) {
 	t.Parallel()
 
@@ -174,6 +395,355 @@ func TestPaneJumpsActivateWhenSelectionAlreadyOnTarget(t *testing.T) {
 	}
 }
 
+func TestBoundaryJumpsActivateBTreeRows(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+
+	lastBTree, ok := m.boundaryIndexMatching(isBTreeNavItem, false)
+	if !ok {
+		t.Fatal("setup: no b-tree rows")
+	}
+	m.selectedIndex = m.indexOfFirstBTree()
+
+	next, cmd := m.Update(keyMsg("g"))
+	pending := next.(model)
+	if cmd != nil {
+		t.Fatalf("g returned cmd %v, want nil", cmd)
+	}
+	if !pending.pendingG {
+		t.Fatal("g did not enter pending-g state")
+	}
+
+	next, cmd = pending.Update(keyMsg("e"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("ge returned cmd %v, want nil for b-tree activation", cmd)
+	}
+	if got.pendingG {
+		t.Fatal("ge left pending-g state set")
+	}
+	if got.selectedIndex != lastBTree {
+		t.Fatalf("ge selected index %d, want last b-tree index %d", got.selectedIndex, lastBTree)
+	}
+	if got.active.kind != got.selectedItem().kind || got.active.schemaID != got.selectedItem().schema.ID {
+		t.Fatalf("ge active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+
+	next, cmd = got.Update(keyMsg("g"))
+	pending = next.(model)
+	next, cmd = pending.Update(keyMsg("g"))
+	got = next.(model)
+	if cmd != nil {
+		t.Fatalf("gg returned cmd %v, want nil for b-tree activation", cmd)
+	}
+	if want := got.indexOfFirstBTree(); got.selectedIndex != want {
+		t.Fatalf("gg selected index %d, want first b-tree index %d", got.selectedIndex, want)
+	}
+	if got.active.kind != got.selectedItem().kind || got.active.schemaID != got.selectedItem().schema.ID {
+		t.Fatalf("gg active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+}
+
+func TestBoundaryJumpsActivateUnfilteredPageRows(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	firstPage := m.selectedIndex
+	lastPage, ok := m.boundaryIndexMatching(func(item navItem) bool { return item.kind == navPage }, false)
+	if !ok {
+		t.Fatal("setup: no page rows")
+	}
+
+	next, _ := m.Update(keyMsg("g"))
+	pending := next.(model)
+	next, cmd := pending.Update(keyMsg("e"))
+	got := next.(model)
+	if cmd == nil {
+		t.Fatal("ge did not return page load command")
+	}
+	if got.selectedIndex != lastPage {
+		t.Fatalf("ge selected index %d, want last page index %d", got.selectedIndex, lastPage)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("ge active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+
+	next, _ = got.Update(keyMsg("g"))
+	pending = next.(model)
+	next, cmd = pending.Update(keyMsg("g"))
+	got = next.(model)
+	if cmd == nil {
+		t.Fatal("gg did not return page load command")
+	}
+	if got.selectedIndex != firstPage {
+		t.Fatalf("gg selected index %d, want first page index %d", got.selectedIndex, firstPage)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("gg active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+}
+
+func TestBoundaryJumpsRespectFilteredPages(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no filtered page rows")
+	}
+	firstPage := m.selectedItem().pageNumber
+	lastPageIndex, ok := m.boundaryIndexMatching(func(item navItem) bool { return item.kind == navPage }, false)
+	if !ok {
+		t.Fatal("setup: no filtered page rows")
+	}
+	lastPage := m.navItems[lastPageIndex].pageNumber
+	if firstPage == lastPage {
+		t.Fatal("setup: filtered page list has only one page")
+	}
+
+	next, _ := m.Update(keyMsg("g"))
+	pending := next.(model)
+	next, cmd := pending.Update(keyMsg("e"))
+	got := next.(model)
+	if cmd == nil {
+		t.Fatal("ge did not return page load command")
+	}
+	if got.active.kind != navPage || got.active.pageNumber != lastPage {
+		t.Fatalf("ge active = %+v, want filtered last page %d", got.active, lastPage)
+	}
+
+	next, _ = got.Update(keyMsg("g"))
+	pending = next.(model)
+	next, cmd = pending.Update(keyMsg("g"))
+	got = next.(model)
+	if cmd == nil {
+		t.Fatal("gg did not return page load command")
+	}
+	if got.active.kind != navPage || got.active.pageNumber != firstPage {
+		t.Fatalf("gg active = %+v, want filtered first page %d", got.active, firstPage)
+	}
+}
+
+func TestPendingGStateClearsOnUnrelatedKeysEscAndPaneJumps(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"h", "esc", "U", "I", "O", "P"} {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+
+			m, inspector := newFixtureModel(t, "companies.db")
+			m = indexAll(t, m, inspector)
+			m.focusedPane = navPane
+			if !m.selectFirstKind(navPage) {
+				t.Fatal("setup: no page rows")
+			}
+
+			next, _ := m.Update(keyMsg("g"))
+			pending := next.(model)
+			if !pending.pendingG {
+				t.Fatal("setup: pending-g state was not set")
+			}
+
+			next, _ = pending.Update(keyMsg(key))
+			got := next.(model)
+			if got.pendingG {
+				t.Fatalf("%q did not clear pending-g state", key)
+			}
+		})
+	}
+}
+
+func TestBoundaryJumpsHandleEmptyVisiblePageList(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		focusedPane:   navPane,
+		navItems:      nil,
+		selectedIndex: 0,
+	}
+
+	next, cmd := m.Update(keyMsg("g"))
+	pending := next.(model)
+	if cmd != nil {
+		t.Fatalf("g returned cmd %v, want nil", cmd)
+	}
+	next, cmd = pending.Update(keyMsg("e"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("ge on empty list returned cmd %v, want nil", cmd)
+	}
+	if !strings.Contains(got.footerLine(), "no pages in current page list") {
+		t.Fatalf("ge on empty page list footer = %q", got.footerLine())
+	}
+}
+
+func TestBoundaryJumpsHandleEmptyVisibleBTreeList(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		focusedPane:   navPane,
+		navItems:      []navItem{{kind: navPage, title: "page 1", pageNumber: 1}},
+		selectedIndex: -1,
+		active:        contentTarget{kind: navTable, schemaName: "missing", schemaID: "table:missing"},
+	}
+
+	next, cmd := m.Update(keyMsg("g"))
+	pending := next.(model)
+	if cmd != nil {
+		t.Fatalf("g returned cmd %v, want nil", cmd)
+	}
+	next, cmd = pending.Update(keyMsg("g"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("gg on empty b-tree list returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != m.selectedIndex {
+		t.Fatalf("gg on empty b-tree list moved selection from %d to %d", m.selectedIndex, got.selectedIndex)
+	}
+	if !strings.Contains(got.footerLine(), "no b-trees in current b-tree list") {
+		t.Fatalf("gg on empty b-tree list footer = %q", got.footerLine())
+	}
+}
+
+func TestPageListUDHotkeysActivateVisibleRows(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	firstIndex := m.selectedIndex
+	firstPage := m.selectedItem().pageNumber
+	lastPage, ok := m.boundaryIndexMatching(func(item navItem) bool { return item.kind == navPage }, false)
+	if !ok {
+		t.Fatal("setup: no page rows")
+	}
+	if lastPage < firstIndex+10 {
+		t.Fatalf("setup: page list has too few rows for a 10-row jump: first=%d last=%d", firstIndex, lastPage)
+	}
+
+	next, cmd := m.Update(keyMsg("d"))
+	down := next.(model)
+	if cmd == nil {
+		t.Fatal("d on page list did not return page load command")
+	}
+	if down.selectedIndex != firstIndex+10 {
+		t.Fatalf("d selected index %d, want %d", down.selectedIndex, firstIndex+10)
+	}
+	if down.active.kind != navPage || down.active.pageNumber != down.selectedItem().pageNumber {
+		t.Fatalf("d active = %+v, selected item = %+v", down.active, down.selectedItem())
+	}
+	if down.drill.active {
+		t.Fatal("d on page list entered drill mode")
+	}
+
+	next, cmd = down.Update(keyMsg("u"))
+	up := next.(model)
+	if cmd == nil {
+		t.Fatal("u on page list did not return page load command")
+	}
+	if up.selectedIndex != firstIndex {
+		t.Fatalf("u selected index %d, want %d", up.selectedIndex, firstIndex)
+	}
+	if up.active.kind != navPage || up.active.pageNumber != firstPage {
+		t.Fatalf("u active = %+v, want page %d", up.active, firstPage)
+	}
+
+	next, cmd = up.Update(keyMsg("u"))
+	stillFirst := next.(model)
+	if cmd != nil {
+		t.Fatalf("u at first page returned cmd %v, want nil", cmd)
+	}
+	if stillFirst.selectedIndex != firstIndex || stillFirst.active.pageNumber != firstPage {
+		t.Fatalf("u at first page changed selection/active to index %d page %d", stillFirst.selectedIndex, stillFirst.active.pageNumber)
+	}
+}
+
+func TestPageListUDHotkeysClampAtBoundaries(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	lastPage, ok := m.boundaryIndexMatching(func(item navItem) bool { return item.kind == navPage }, false)
+	if !ok {
+		t.Fatal("setup: no page rows")
+	}
+	m.selectedIndex = lastPage - 1
+
+	next, cmd := m.Update(keyMsg("d"))
+	got := next.(model)
+	if cmd == nil {
+		t.Fatal("d near last page did not return page load command")
+	}
+	if got.selectedIndex != lastPage {
+		t.Fatalf("d near last page selected index %d, want clamped last page index %d", got.selectedIndex, lastPage)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("d active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+}
+
+func TestPageListUDHotkeysRespectFilteredPages(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no filtered page rows")
+	}
+	firstFilteredPage := m.selectedItem().pageNumber
+	lastPage, ok := m.boundaryIndexMatching(func(item navItem) bool { return item.kind == navPage }, false)
+	if !ok {
+		t.Fatal("setup: no filtered page rows")
+	}
+	expectedDownIndex := min(m.selectedIndex+10, lastPage)
+
+	next, cmd := m.Update(keyMsg("d"))
+	down := next.(model)
+	if cmd == nil {
+		t.Fatal("d on filtered page list did not return page load command")
+	}
+	if down.selectedIndex != expectedDownIndex {
+		t.Fatalf("d selected filtered index %d, want %d", down.selectedIndex, expectedDownIndex)
+	}
+	if down.active.kind != navPage || down.active.pageNumber != down.selectedItem().pageNumber {
+		t.Fatalf("d active = %+v, selected item = %+v", down.active, down.selectedItem())
+	}
+	if down.active.pageNumber == firstFilteredPage {
+		t.Fatalf("d stayed on first filtered page %d", firstFilteredPage)
+	}
+
+	next, cmd = down.Update(keyMsg("u"))
+	up := next.(model)
+	if cmd == nil {
+		t.Fatal("u on filtered page list did not return page load command")
+	}
+	if up.active.kind != navPage || up.active.pageNumber != firstFilteredPage {
+		t.Fatalf("u active = %+v, want first filtered page %d", up.active, firstFilteredPage)
+	}
+}
+
 func TestDigitPaneKeysAreNoOps(t *testing.T) {
 	t.Parallel()
 
@@ -213,7 +783,7 @@ func TestRemovedLetterKeysAreNoOps(t *testing.T) {
 	idx := m.selectedIndex
 	active := m.active
 
-	for _, key := range []string{"g", "h", "p"} {
+	for _, key := range []string{"h", "p"} {
 		next, _ := m.Update(keyMsg(key))
 		got := next.(model)
 		if got.selectedIndex != idx {
