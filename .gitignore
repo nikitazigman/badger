@@ -26,6 +26,9 @@ go.work
 go.work.sum
 .gocache
 
+# Generated test fixtures
+fixtures/bbolt/*.db
+
 # env file
 .env
 
