@@ -143,8 +143,8 @@ Keybindings:
 | `enter` | Open the selected row when `[U] B-TREES` or `[I] PAGES` is focused |
 | `gg` | Jump to the first visible row in the active `[U] B-TREES` or `[I] PAGES` list |
 | `ge` | Jump to the last visible row in the active `[U] B-TREES` or `[I] PAGES` list |
-| `u` | Move up 10 rows in `[I] PAGES` and load the selected page |
-| `d` | Move down 10 rows in `[I] PAGES`; drill into the selected page block or drill child when `[O] HEX` or `[P] META` is focused |
+| `u` | Move up 10 rows in `[U] B-TREES` or `[I] PAGES` and open/load the selected row |
+| `d` | Move down 10 rows in `[U] B-TREES` or `[I] PAGES`; drill into the selected page block or drill child when `[O] HEX` or `[P] META` is focused |
 | `b` | Back out of the current drill layer |
 | `f` | Filter pages to the selected storage object; clear it on the active source row |
 | `esc` | Clear the active filter; when unfiltered, reset page sub-selection/loading state |

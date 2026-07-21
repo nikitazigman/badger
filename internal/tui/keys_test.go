@@ -39,6 +39,31 @@ func pageLoadedFromCmd(t *testing.T, cmd tea.Cmd) pageLoadedMsg {
 	return loaded
 }
 
+func syntheticBTreeListModel(count int) model {
+	items := make([]navItem, 0, count+1)
+	for idx := 0; idx < count; idx++ {
+		obj := schemaObjectViewModel{
+			ID:       storage.BTreeID(fmt.Sprintf("table:%02d", idx)),
+			Kind:     storage.BTreeTable,
+			Type:     "table",
+			Name:     fmt.Sprintf("table_%02d", idx),
+			RootPage: uint64(idx + 1),
+		}
+		items = append(items, navItem{
+			kind:   navTable,
+			title:  obj.Name,
+			schema: &obj,
+		})
+	}
+	items = append(items, navItem{kind: navPage, title: "page 1", pageNumber: 1})
+	return model{
+		navItems:      items,
+		selectedIndex: 0,
+		active:        contentTarget{kind: navTable, schemaName: "table_00", schemaID: "table:00"},
+		focusedPane:   navPane,
+	}
+}
+
 func TestPaneJumpsAutoActivate(t *testing.T) {
 	t.Parallel()
 
@@ -447,6 +472,56 @@ func TestBoundaryJumpsActivateBTreeRows(t *testing.T) {
 	}
 }
 
+func TestBoundaryJumpsWorkAfterBTreePaneJump(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(12)
+	pageIndex := len(m.navItems) - 1
+	m.selectedIndex = pageIndex
+	m.active = contentTarget{kind: navTable, schemaName: "table_03", schemaID: "table:03"}
+	m.focusedPane = inspectorPane
+
+	next, cmd := m.Update(keyMsg("U"))
+	btrees := next.(model)
+	if cmd != nil {
+		t.Fatalf("U returned cmd %v, want nil", cmd)
+	}
+	if btrees.focusedPane != navPane {
+		t.Fatalf("U focused pane = %v, want navPane", btrees.focusedPane)
+	}
+	if btrees.selectedIndex != 3 {
+		t.Fatalf("U selected index %d, want active b-tree index 3", btrees.selectedIndex)
+	}
+
+	next, _ = btrees.Update(keyMsg("g"))
+	pending := next.(model)
+	next, cmd = pending.Update(keyMsg("e"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("ge returned cmd %v, want nil for b-tree activation", cmd)
+	}
+	if got.selectedIndex != 11 {
+		t.Fatalf("ge selected index %d, want last b-tree index 11", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:11" {
+		t.Fatalf("ge active = %+v, want table:11", got.active)
+	}
+
+	next, _ = got.Update(keyMsg("g"))
+	pending = next.(model)
+	next, cmd = pending.Update(keyMsg("g"))
+	got = next.(model)
+	if cmd != nil {
+		t.Fatalf("gg returned cmd %v, want nil for b-tree activation", cmd)
+	}
+	if got.selectedIndex != 0 {
+		t.Fatalf("gg selected index %d, want first b-tree index 0", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:00" {
+		t.Fatalf("gg active = %+v, want table:00", got.active)
+	}
+}
+
 func TestBoundaryJumpsActivateUnfilteredPageRows(t *testing.T) {
 	t.Parallel()
 
@@ -614,6 +689,56 @@ func TestBoundaryJumpsHandleEmptyVisibleBTreeList(t *testing.T) {
 	}
 	if !strings.Contains(got.footerLine(), "no b-trees in current b-tree list") {
 		t.Fatalf("gg on empty b-tree list footer = %q", got.footerLine())
+	}
+}
+
+func TestBTreeListUDHotkeysActivateVisibleRows(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(15)
+	firstIndex := m.selectedIndex
+
+	next, cmd := m.Update(keyMsg("d"))
+	down := next.(model)
+	if cmd != nil {
+		t.Fatalf("d on b-tree list returned cmd %v, want nil", cmd)
+	}
+	if down.selectedIndex != firstIndex+10 {
+		t.Fatalf("d selected index %d, want %d", down.selectedIndex, firstIndex+10)
+	}
+	if down.active.kind != navTable || down.active.schemaID != "table:10" {
+		t.Fatalf("d active = %+v, want table:10", down.active)
+	}
+
+	next, cmd = down.Update(keyMsg("u"))
+	up := next.(model)
+	if cmd != nil {
+		t.Fatalf("u on b-tree list returned cmd %v, want nil", cmd)
+	}
+	if up.selectedIndex != firstIndex {
+		t.Fatalf("u selected index %d, want %d", up.selectedIndex, firstIndex)
+	}
+	if up.active.kind != navTable || up.active.schemaID != "table:00" {
+		t.Fatalf("u active = %+v, want table:00", up.active)
+	}
+}
+
+func TestBTreeListUDHotkeysClampAtBoundaries(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(15)
+	m.selectedIndex = 13
+
+	next, cmd := m.Update(keyMsg("d"))
+	got := next.(model)
+	if cmd != nil {
+		t.Fatalf("d near last b-tree returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != 14 {
+		t.Fatalf("d near last b-tree selected index %d, want clamped last index 14", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:14" {
+		t.Fatalf("d active = %+v, want table:14", got.active)
 	}
 }
 

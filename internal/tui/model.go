@@ -341,15 +341,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "d":
 		if m.focusedPane == navPane {
-			if m.selectedIndexHasKind(navPage) && m.moveSelectionWithinSection(10) {
-				return m.activateSelected()
+			if m.selectedIndexHasBTree() || m.selectedIndexHasKind(navPage) {
+				if m.moveSelectionWithinSection(10) {
+					return m.activateSelected()
+				}
 			}
 		} else if m.active.kind == navPage {
 			m.drillIn()
 		}
 		return m, nil
 	case "u":
-		if m.focusedPane == navPane && m.selectedIndexHasKind(navPage) {
+		if m.focusedPane == navPane && (m.selectedIndexHasBTree() || m.selectedIndexHasKind(navPage)) {
 			if m.moveSelectionWithinSection(-10) {
 				return m.activateSelected()
 			}
