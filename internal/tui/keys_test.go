@@ -1213,6 +1213,120 @@ func TestDrillNoOpAndPageChangeReset(t *testing.T) {
 	}
 }
 
+func TestBboltDescriptorFieldDrillNavigationAndHighlight(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]byte, 32)
+	for idx := range raw {
+		raw[idx] = byte(idx)
+	}
+	page := &storage.PageInspection{
+		Ref: storage.PageRef{ID: 1},
+		Raw: raw,
+		HexBlocks: []storage.HexBlock{{
+			Kind:  pageBlockLeafDescriptors,
+			Title: "Leaf Descriptors",
+			Span:  storage.ByteSpan{Start: 0, Size: 16},
+			Children: []storage.HexBlock{{
+				Kind:  drillChildLeafDescriptor,
+				Title: "Leaf Entry 0 Descriptor",
+				Span:  storage.ByteSpan{Start: 0, Size: 16},
+				Children: []storage.HexBlock{
+					{Kind: drillChildDescriptorFlags, Title: "Flags", Span: storage.ByteSpan{Start: 0, Size: 4}},
+					{Kind: drillChildDescriptorPos, Title: "Position", Span: storage.ByteSpan{Start: 4, Size: 4}},
+					{Kind: drillChildDescriptorKeySz, Title: "Key size", Span: storage.ByteSpan{Start: 8, Size: 4}},
+					{Kind: drillChildDescriptorValSz, Title: "Value size", Span: storage.ByteSpan{Start: 12, Size: 4}},
+				},
+			}},
+		}},
+	}
+	m := model{currentPage: page, selectedBlock: 0, blockSelected: true, width: 80, height: 24}
+
+	m.drillIn()
+	descriptor, ok := m.selectedDrillChild()
+	if !ok || descriptor.kind != drillChildLeafDescriptor {
+		t.Fatalf("selected descriptor child = %+v, want leaf descriptor", descriptor)
+	}
+	m.drillIn()
+	field, ok := m.selectedDrillChild()
+	if !ok || field.kind != drillChildDescriptorFlags {
+		t.Fatalf("selected descriptor field = %+v, want flags", field)
+	}
+	if !m.moveDrillChild(1) {
+		t.Fatal("moving between descriptor fields returned false")
+	}
+	field, ok = m.selectedDrillChild()
+	if !ok || field.kind != drillChildDescriptorPos || field.meta != (storage.ByteSpan{Start: 4, Size: 4}) {
+		t.Fatalf("selected descriptor field = %+v, want position bytes 4..7", field)
+	}
+
+	rendered := formatHexRowWithSelection(0, raw[:16], m.currentPageBlocks(), field.meta, true, m.currentDrillChildren())
+	if want := selectedHexByteStyle.Render("04"); !strings.Contains(rendered, want) {
+		t.Fatalf("selected descriptor field byte did not use selected style:\n%s", rendered)
+	}
+}
+
+func TestBboltBucketValueFieldDrillNavigationAndHighlight(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]byte, 64)
+	for idx := range raw {
+		raw[idx] = byte(idx)
+	}
+	page := &storage.PageInspection{
+		Ref: storage.PageRef{ID: 1},
+		Raw: raw,
+		HexBlocks: []storage.HexBlock{{
+			Kind:  pageBlockLeafEntry,
+			Title: "Leaf Entry 0",
+			Span:  storage.ByteSpan{Start: 0, Size: 32},
+			Children: []storage.HexBlock{
+				{Kind: drillChildLeafKey, Title: "Leaf Entry 0 Key", Span: storage.ByteSpan{Start: 0, Size: 4}},
+				{
+					Kind:  drillChildLeafValue,
+					Title: "Leaf Entry 0 Value",
+					Span:  storage.ByteSpan{Start: 16, Size: 32},
+					Children: []storage.HexBlock{
+						{Kind: drillChildBucketRootPage, Title: "Root page", Span: storage.ByteSpan{Start: 16, Size: 8}},
+						{Kind: drillChildBucketSequence, Title: "Sequence", Span: storage.ByteSpan{Start: 24, Size: 8}},
+						{Kind: pageBlockPageHeader, Title: "Inline Page Header", Span: storage.ByteSpan{Start: 32, Size: 16}},
+					},
+				},
+			},
+		}},
+	}
+	m := model{currentPage: page, selectedBlock: 0, blockSelected: true, width: 80, height: 24}
+
+	m.drillIn()
+	if !m.moveDrillChild(1) {
+		t.Fatal("moving from leaf key to value returned false")
+	}
+	value, ok := m.selectedDrillChild()
+	if !ok || value.kind != drillChildLeafValue {
+		t.Fatalf("selected leaf child = %+v, want value", value)
+	}
+	m.drillIn()
+	root, ok := m.selectedDrillChild()
+	if !ok || root.kind != drillChildBucketRootPage || root.meta != (storage.ByteSpan{Start: 16, Size: 8}) {
+		t.Fatalf("selected bucket field = %+v, want root page bytes 16..23", root)
+	}
+	if m.currentDrillChildren()[0].kind != drillChildBucketRootPage || m.currentDrillChildren()[1].kind != drillChildBucketSequence || m.currentDrillChildren()[2].kind != pageBlockPageHeader {
+		t.Fatalf("bucket value children order = %+v, want root, sequence, inline page header", m.currentDrillChildren())
+	}
+	if !m.moveDrillChild(1) {
+		t.Fatal("moving between bucket value fields returned false")
+	}
+	sequence, ok := m.selectedDrillChild()
+	if !ok || sequence.kind != drillChildBucketSequence {
+		t.Fatalf("selected bucket field = %+v, want sequence", sequence)
+	}
+
+	rendered := formatHexRowWithSelection(16, raw[16:32], m.currentPageBlocks(), sequence.meta, true, m.currentDrillChildren())
+	if want := selectedHexByteStyle.Render("18"); !strings.Contains(rendered, want) {
+		t.Fatalf("selected bucket field byte did not use selected style:\n%s", rendered)
+	}
+}
+
 func TestDrillSubtypeStylesAreContrasting(t *testing.T) {
 	t.Parallel()
 

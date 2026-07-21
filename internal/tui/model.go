@@ -1792,6 +1792,10 @@ func drillChildStyle(kind string) lipgloss.Style {
 		return leafValueHexByteStyle
 	case drillChildLeafEntry:
 		return cellHexByteStyle
+	case drillChildDescriptorFlags, drillChildDescriptorPos, drillChildDescriptorKeySz, drillChildDescriptorValSz, drillChildDescriptorChild:
+		return leafDescriptorHexByteStyle
+	case drillChildBucketRootPage, drillChildBucketSequence:
+		return leafValueHexByteStyle
 	default:
 		return cellHexByteStyle
 	}

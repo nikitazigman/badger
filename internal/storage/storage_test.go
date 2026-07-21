@@ -622,6 +622,12 @@ func TestBboltBranchPageInspectionExposesBranchRowsAndBlocks(t *testing.T) {
 		assertFieldSpan(t, descriptor.Rows, "Position", descriptor.Span.Start, 4)
 		assertFieldSpan(t, descriptor.Rows, "Key size", descriptor.Span.Start+4, 4)
 		assertFieldSpan(t, descriptor.Rows, "Child page", descriptor.Span.Start+8, 8)
+		assertHexFieldChild(t, descriptor.Children, blockDescriptorPosition, "Position", descriptor.Span.Start, 4)
+		assertHexFieldChild(t, descriptor.Children, blockDescriptorKeySize, "Key size", descriptor.Span.Start+4, 4)
+		assertHexFieldChild(t, descriptor.Children, blockDescriptorChildPage, "Child page", descriptor.Span.Start+8, 8)
+		if testHexBlockByKind(descriptor.Children, blockDescriptorValueSize) != nil {
+			t.Fatal("branch descriptor exposes a value-size field, want no value drill target")
+		}
 
 		entry := testHexBlockByKind(page.HexBlocks, blockBranchEntry)
 		if entry == nil {
@@ -649,13 +655,14 @@ func TestBboltInlineBucketLeafEntryExposesEmbeddedPageSpans(t *testing.T) {
 	if value == nil {
 		t.Fatal("inline bucket leaf entry missing value block")
 	}
-	if testHexBlockByKind(entry.Children, blockBucketHeader) != nil || testHexBlockByKind(entry.Children, blockInlineBucketPage) != nil {
+	if testHexBlockByKind(entry.Children, blockBucketRootPage) != nil ||
+		testHexBlockByKind(entry.Children, blockBucketSequence) != nil ||
+		testHexBlockByKind(entry.Children, blockPageHeader) != nil {
 		t.Fatal("inline bucket internals are exposed as leaf-entry drill siblings; want them under value")
 	}
-	header := testHexBlockByKind(value.Children, blockBucketHeader)
-	if header == nil {
-		t.Fatal("inline bucket value missing bucket header child")
-	}
+	assertHexFieldChild(t, value.Children, blockBucketRootPage, "Root page", value.Span.Start, 8)
+	assertHexFieldChild(t, value.Children, blockBucketSequence, "Sequence", value.Span.Start+8, 8)
+	assertHexChildOrder(t, value.Children, []string{blockBucketRootPage, blockBucketSequence, blockPageHeader})
 	inlineHeader := testHexBlockByKind(value.Children, blockPageHeader)
 	if inlineHeader == nil {
 		t.Fatal("inline bucket value missing embedded page header child")
@@ -669,7 +676,6 @@ func TestBboltInlineBucketLeafEntryExposesEmbeddedPageSpans(t *testing.T) {
 		t.Fatal("inline bucket value missing embedded leaf entry child")
 	}
 
-	assertByteSpan(t, header.Span, value.Span.Start, 16)
 	if inlineHeader.Span.Start != value.Span.Start+16 {
 		t.Fatalf("inline page header starts at %d, want parent value start + 16 = %d", inlineHeader.Span.Start, value.Span.Start+16)
 	}
@@ -841,6 +847,8 @@ func assertLeafEntryStorageBlocks(t *testing.T, entry HexBlock, wantBucket bool)
 		if testFieldValue(value.Rows, "Sequence") == "" {
 			t.Fatal("bucket value block missing decoded sequence")
 		}
+		assertHexFieldChild(t, value.Children, blockBucketRootPage, "Root page", value.Span.Start, 8)
+		assertHexFieldChild(t, value.Children, blockBucketSequence, "Sequence", value.Span.Start+8, 8)
 	}
 	if !wantBucket && testFieldValue(entry.Rows, "Type") != "key/value" {
 		t.Fatalf("leaf entry type = %q, want key/value", testFieldValue(entry.Rows, "Type"))
@@ -866,6 +874,37 @@ func assertLeafDescriptorStorageBlock(t *testing.T, page *PageInspection) {
 	assertFieldSpan(t, descriptor.Rows, "Position", descriptor.Span.Start+4, 4)
 	assertFieldSpan(t, descriptor.Rows, "Key size", descriptor.Span.Start+8, 4)
 	assertFieldSpan(t, descriptor.Rows, "Value size", descriptor.Span.Start+12, 4)
+	assertHexFieldChild(t, descriptor.Children, blockDescriptorFlags, "Flags", descriptor.Span.Start, 4)
+	assertHexFieldChild(t, descriptor.Children, blockDescriptorPosition, "Position", descriptor.Span.Start+4, 4)
+	assertHexFieldChild(t, descriptor.Children, blockDescriptorKeySize, "Key size", descriptor.Span.Start+8, 4)
+	assertHexFieldChild(t, descriptor.Children, blockDescriptorValueSize, "Value size", descriptor.Span.Start+12, 4)
+}
+
+func assertHexFieldChild(t *testing.T, children []HexBlock, kind string, label string, start int, size int) {
+	t.Helper()
+
+	child := testHexBlockByKind(children, kind)
+	if child == nil {
+		t.Fatalf("missing field child kind %q", kind)
+	}
+	if child.Title != label {
+		t.Fatalf("%s title = %q, want %q", kind, child.Title, label)
+	}
+	assertByteSpan(t, child.Span, start, size)
+	assertFieldSpan(t, child.Rows, label, start, size)
+}
+
+func assertHexChildOrder(t *testing.T, children []HexBlock, want []string) {
+	t.Helper()
+
+	if len(children) < len(want) {
+		t.Fatalf("children length = %d, want at least %d", len(children), len(want))
+	}
+	for idx, kind := range want {
+		if children[idx].Kind != kind {
+			t.Fatalf("child %d kind = %q, want %q", idx, children[idx].Kind, kind)
+		}
+	}
 }
 
 func assertPageSummary(t *testing.T, summaries []PageSummary, id uint64, classification PageClassification) {

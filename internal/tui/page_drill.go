@@ -31,6 +31,13 @@ const (
 	drillChildLeafDescriptor   = "leaf_descriptor"
 	drillChildLeafKey          = "leaf_key"
 	drillChildLeafValue        = "leaf_value"
+	drillChildDescriptorFlags  = "descriptor_flags"
+	drillChildDescriptorPos    = "descriptor_position"
+	drillChildDescriptorKeySz  = "descriptor_key_size"
+	drillChildDescriptorValSz  = "descriptor_value_size"
+	drillChildDescriptorChild  = "descriptor_child_page"
+	drillChildBucketRootPage   = "bucket_root_page"
+	drillChildBucketSequence   = "bucket_sequence"
 )
 
 type drillChild struct {
