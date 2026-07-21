@@ -135,7 +135,8 @@ Keybindings:
 
 | Key | Action |
 | --- | --- |
-| `up` / `down`, `k` / `j` | Move within the focused pane; `25j` / `25k` move counted visible rows in `[U] B-TREES` or `[I] PAGES` |
+| `up` / `down`, `k` / `j` | Move one row within the focused pane |
+| `Nj` / `Nk` / `Ngg` | Move `N` visible rows down/up with `Nj` / `Nk`; jump directly to visible page `N` in `[I] PAGES` or visible B-tree row `N` in `[U] B-TREES` with `Ngg` |
 | `U` | Focus `[U] B-TREES`, preserving the current b-tree row when possible, and open it |
 | `I` | Focus `[I] PAGES`, preserving the current page row when possible, and load it |
 | `O` | Focus `[O] Detail` / `[O] HEX` |

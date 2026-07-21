@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -284,9 +285,21 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingG = false
 		switch key {
 		case "g":
+			if m.numericPrefix != "" {
+				return m.jumpActiveListDirect()
+			}
 			return m.jumpActiveListBoundary(true)
 		case "e":
+			if m.numericPrefix != "" {
+				m.rejectNumericPrefix("ge")
+				return m, nil
+			}
 			return m.jumpActiveListBoundary(false)
+		default:
+			if m.numericPrefix != "" {
+				m.clearNumericPrefix()
+				return m, nil
+			}
 		}
 	}
 
@@ -303,9 +316,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearNumericPrefix()
 		case "d", "u":
 			m.rejectNumericPrefix(key)
-			return m, nil
-		case "g":
-			m.rejectNumericPrefix("gg")
 			return m, nil
 		default:
 			m.clearNumericPrefix()
@@ -521,6 +531,49 @@ func (m model) jumpActiveListBoundary(first bool) (tea.Model, tea.Cmd) {
 	return m.activateSelected()
 }
 
+func (m model) jumpActiveListDirect() (tea.Model, tea.Cmd) {
+	if m.focusedPane != navPane {
+		m.clearNumericPrefix()
+		return m, nil
+	}
+
+	targetText := m.numericPrefix
+	target, err := strconv.ParseUint(targetText, 10, 64)
+	m.clearNumericPrefix()
+	if err != nil {
+		return m.directJumpFailure(targetText)
+	}
+
+	switch {
+	case m.selectedIndexHasBTree():
+		if idx, ok := m.indexOfBTreeRowNumber(target); ok {
+			m.selectNavIndex(idx)
+			return m.activateSelected()
+		}
+		m.status = fmt.Sprintf("b-tree %s is not in current b-tree list", strconv.FormatUint(target, 10))
+		return m, nil
+	case m.selectedIndexHasKind(navPage):
+		if idx, ok := m.indexOfPageRow(target); ok {
+			m.selectNavIndex(idx)
+			return m.activateSelected()
+		}
+		m.status = fmt.Sprintf("page %s is not in current page list", strconv.FormatUint(target, 10))
+		return m, nil
+	default:
+		return m.directJumpFailure(targetText)
+	}
+}
+
+func (m model) directJumpFailure(targetText string) (tea.Model, tea.Cmd) {
+	switch {
+	case m.active.kind == navTable || m.active.kind == navIndex || isBTreeNavItem(m.selectedItem()):
+		m.status = fmt.Sprintf("b-tree %s is not in current b-tree list", targetText)
+	case m.active.kind == navPage || m.selectedItem().kind == navPage:
+		m.status = fmt.Sprintf("page %s is not in current page list", targetText)
+	}
+	return m, nil
+}
+
 func (m model) boundaryIndexMatching(match func(navItem) bool, first bool) (int, bool) {
 	found := false
 	result := 0
@@ -542,7 +595,7 @@ func isDigitKey(key string) bool {
 }
 
 func keyAcceptsNumericPrefix(key string) bool {
-	return key == "j" || key == "k"
+	return key == "j" || key == "k" || key == "g"
 }
 
 func (m model) canUseNumericPrefix() bool {
@@ -704,6 +757,23 @@ func (m model) firstIndexMatching(match func(navItem) bool) (int, bool) {
 func (m model) indexOfPageRow(pageNumber uint64) (int, bool) {
 	for idx, item := range m.navItems {
 		if item.kind == navPage && item.pageNumber == pageNumber {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func (m model) indexOfBTreeRowNumber(rowNumber uint64) (int, bool) {
+	if rowNumber == 0 {
+		return 0, false
+	}
+	var current uint64
+	for idx, item := range m.navItems {
+		if !isBTreeNavItem(item) {
+			continue
+		}
+		current++
+		if current == rowNumber {
 			return idx, true
 		}
 	}
@@ -1173,7 +1243,7 @@ func pagePaneWidths(availableWidth int, navWidth int, explorerWidth int, inspect
 // it is the latest transient status, if any.
 func (m model) footerLine() string {
 	keys := m.footerKeyHints()
-	if m.status != "" && strings.HasPrefix(m.status, "no ") {
+	if m.status != "" && (strings.HasPrefix(m.status, "no ") || strings.Contains(m.status, " is not in current ")) {
 		return m.status + "  |  " + keys
 	}
 	if m.isFiltered() {
@@ -1283,12 +1353,14 @@ func (m model) viewNavigationSection(width int, outerHeight int, section string)
 	active := m.focusedPane == navPane && sectionForNavItem(m.selectedItem()) == section
 
 	rows := make([]string, 0, contentHeight)
-	for _, row := range m.visibleNavSection(section, contentHeight) {
+	for _, row := range m.visibleNavSection(section, contentHeight, contentWidth) {
+		marker := m.navMarker(row.index)
 		lineStyle := navItemStyle
-		if row.index == m.selectedIndex {
+		selected := row.index == m.selectedIndex
+		if selected {
 			lineStyle = selectedNavItemStyle
 		}
-		rows = append(rows, renderNavLine(lineStyle, contentWidth, m.navMarker(row.index), row.text))
+		rows = append(rows, renderNavLine(lineStyle, contentWidth, marker, row.numberLabel, row.text, selected))
 	}
 
 	return renderTitledFrame(width, outerHeight, sectionLabel(section), active, rows)
@@ -1304,19 +1376,29 @@ func (m model) navSectionSize(section string) int {
 	return count
 }
 
-func (m model) visibleNavSection(section string, height int) []visibleNavRow {
+func (m model) visibleNavSection(section string, height int, textWidth int) []visibleNavRow {
 	rows := make([]visibleNavRow, 0, len(m.navItems))
+	btreeRowNumber := 0
+	btreeRowDigits := decimalDigits(m.navSectionSize("B-Trees"))
 	for idx, item := range m.navItems {
 		if sectionForNavItem(item) != section {
 			continue
 		}
 		text := item.title
+		numberLabel := ""
 		if (item.kind == navTable || item.kind == navIndex) && item.schema != nil {
+			btreeRowNumber++
 			text = navSchemaRowText(*item.schema)
+			if section == "B-Trees" {
+				label := fmt.Sprintf("%*d  ", btreeRowDigits, btreeRowNumber)
+				if lipgloss.Width(text)+lipgloss.Width(label) <= textWidth {
+					numberLabel = label
+				}
+			}
 		} else if item.subtitle != "" {
 			text += "  " + mutedInline(item.subtitle)
 		}
-		rows = append(rows, visibleNavRow{index: idx, section: section, text: text})
+		rows = append(rows, visibleNavRow{index: idx, section: section, text: text, numberLabel: numberLabel})
 	}
 	if height <= 0 || len(rows) <= height {
 		return rows
@@ -1339,6 +1421,18 @@ func (m model) visibleNavSection(section string, height int) []visibleNavRow {
 		start = max(0, end-height)
 	}
 	return rows[start:end]
+}
+
+func decimalDigits(n int) int {
+	if n < 10 {
+		return 1
+	}
+	digits := 0
+	for n > 0 {
+		digits++
+		n /= 10
+	}
+	return digits
 }
 
 func renderTitledFrame(width int, height int, title string, active bool, rows []string) string {
@@ -1390,34 +1484,52 @@ func renderTitledFrameWithScrollbar(width int, height int, title string, active 
 	return strings.Join(lines, "\n")
 }
 
-func renderNavLine(style lipgloss.Style, width int, marker string, text string) string {
-	markerWidth := lipgloss.Width(marker)
-	textWidth := max(0, width-markerWidth)
-	line := marker + truncateCells(text, textWidth)
-	return style.Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, line))
+func renderNavLine(style lipgloss.Style, width int, marker string, numberLabel string, text string, selected bool) string {
+	numberLabel = navPrefixLabel(marker, numberLabel)
+	numberWidth := lipgloss.Width(numberLabel)
+	textWidth := max(0, width-numberWidth)
+	renderedText := lipgloss.PlaceHorizontal(textWidth, lipgloss.Left, truncateCells(text, textWidth))
+	numberStyle := navRowNumberStyle
+	if marker == "▶" && selected {
+		numberStyle = navSourceSelectedMarkerStyle
+	} else if marker == "▶" {
+		numberStyle = navSourceMarkerStyle
+	} else if selected || marker != "" {
+		numberStyle = selectedNavRowNumberStyle
+	}
+	return numberStyle.Render(numberLabel) + style.Render(renderedText)
 }
 
-// navMarker returns the two-cell row prefix: ▶ for the active filter source (it wins, so
-// the cursor and source merge into a single ▶ when they coincide), > for the cursor, two
-// spaces otherwise. Never two markers on a row (design §2).
+func navPrefixLabel(marker string, numberLabel string) string {
+	if marker == "" || numberLabel == "" {
+		return numberLabel
+	}
+	width := lipgloss.Width(numberLabel)
+	return marker + strings.Repeat(" ", max(0, width-lipgloss.Width(marker)))
+}
+
+// navMarker returns the row prefix: ▶ for the active filter source (it wins, so the
+// cursor and source merge into a single ▶ when they coincide), > for the cursor, empty
+// otherwise. Never two markers on a row (design §2).
 func (m model) navMarker(idx int) string {
 	if idx < 0 || idx >= len(m.navItems) {
-		return "  "
+		return ""
 	}
 	item := m.navItems[idx]
 	if item.schema != nil && m.objectIsFilterSource(*item.schema) {
-		return "▶ "
+		return "▶"
 	}
 	if idx == m.selectedIndex {
-		return "> "
+		return ">"
 	}
-	return "  "
+	return ""
 }
 
 type visibleNavRow struct {
-	index   int
-	section string
-	text    string
+	index       int
+	section     string
+	text        string
+	numberLabel string
 }
 
 func (m model) visibleNavItems(height int) []visibleNavRow {
@@ -2059,6 +2171,10 @@ var (
 	navItemStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	selectedNavItemStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
 	mutedStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	navRowNumberStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	selectedNavRowNumberStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
+	navSourceMarkerStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	navSourceSelectedMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("24"))
 	hexOffsetStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	unknownHexByteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	dbHeaderHexByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
@@ -2222,7 +2338,8 @@ func navSchemaRowText(obj schemaObjectViewModel) string {
 	if obj.IsSystem {
 		return obj.Name
 	}
-	return objectIcon(obj) + " " + obj.Name
+	indentWidth := len(obj.Name) - len(strings.TrimLeft(obj.Name, " "))
+	return strings.Repeat(" ", indentWidth) + objectIcon(obj) + " " + strings.TrimLeft(obj.Name, " ")
 }
 
 // objectIcon maps a schema object to its glyph: ◈ index, ⊞ virtual table / view (no

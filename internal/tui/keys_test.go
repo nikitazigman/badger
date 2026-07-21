@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -9,6 +10,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nikitazigman/badger/internal/storage"
 )
+
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
+func stripANSI(text string) string {
+	return ansiEscapeRE.ReplaceAllString(text, "")
+}
 
 // firstIndexOfKind returns the navItems index of the first row of the given kind, or -1.
 func firstIndexOfKind(items []navItem, kind navKind) int {
@@ -52,6 +59,14 @@ func updateKeySequence(t *testing.T, m model, keys ...string) (model, tea.Cmd) {
 		cmd = nextCmd
 	}
 	return current, cmd
+}
+
+func directGGKeys(target string) []string {
+	keys := make([]string, 0, len(target)+2)
+	for _, r := range target {
+		keys = append(keys, string(r))
+	}
+	return append(keys, "g", "g")
 }
 
 func syntheticBTreeListModel(count int) model {
@@ -704,6 +719,197 @@ func TestBoundaryJumpsHandleEmptyVisibleBTreeList(t *testing.T) {
 	}
 	if !strings.Contains(got.footerLine(), "no b-trees in current b-tree list") {
 		t.Fatalf("gg on empty b-tree list footer = %q", got.footerLine())
+	}
+}
+
+func TestPageListDirectJumpActivatesSQLitePage(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+
+	target := m.db.FirstPageID + 3
+	if _, ok := m.indexOfPageRow(target); !ok {
+		t.Fatalf("setup: page %d row not found", target)
+	}
+
+	got, cmd := updateKeySequence(t, m, directGGKeys(fmt.Sprint(target))...)
+	if cmd == nil {
+		t.Fatalf("%dgg did not return page load command", target)
+	}
+	if got.selectedItem().pageNumber != target {
+		t.Fatalf("%dgg selected page %d, want %d", target, got.selectedItem().pageNumber, target)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != target {
+		t.Fatalf("%dgg active = %+v, want page %d", target, got.active, target)
+	}
+	if got.numericPrefix != "" || got.pendingG {
+		t.Fatalf("%dgg left numeric state prefix=%q pendingG=%v", target, got.numericPrefix, got.pendingG)
+	}
+}
+
+func TestPageListDirectJumpActivatesBboltPageZero(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "bbolt/users.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	pageOne, ok := m.indexOfPageRow(1)
+	if !ok {
+		t.Fatal("setup: page 1 row not found")
+	}
+	m.selectedIndex = pageOne
+
+	got, cmd := updateKeySequence(t, m, "0", "g", "g")
+	if cmd == nil {
+		t.Fatal("0gg did not return page load command")
+	}
+	if got.selectedItem().pageNumber != 0 {
+		t.Fatalf("0gg selected page %d, want 0", got.selectedItem().pageNumber)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != 0 {
+		t.Fatalf("0gg active = %+v, want page 0", got.active)
+	}
+}
+
+func TestPageListDirectJumpFailuresPreserveSelection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("filtered out", func(t *testing.T) {
+		t.Parallel()
+
+		m, inspector := newFixtureModel(t, "companies.db")
+		m = indexAll(t, m, inspector)
+		companies := objectByName(t, m.db, "companies")
+		m.applyFilter(companies)
+		m.focusedPane = navPane
+		if !m.selectFirstKind(navPage) {
+			t.Fatal("setup: no filtered page rows")
+		}
+		selectedIndex := m.selectedIndex
+		active := m.active
+
+		filtered := map[uint64]bool{}
+		for _, item := range m.navItems {
+			if item.kind == navPage {
+				filtered[item.pageNumber] = true
+			}
+		}
+		var hidden uint64
+		for page := m.db.FirstPageID; page < m.db.FirstPageID+m.db.PageCount; page++ {
+			if !filtered[page] {
+				hidden = page
+				break
+			}
+		}
+		if hidden == 0 {
+			t.Fatal("setup: no hidden page found")
+		}
+
+		got, cmd := updateKeySequence(t, m, directGGKeys(fmt.Sprint(hidden))...)
+		if cmd != nil {
+			t.Fatalf("%dgg returned cmd %v, want nil", hidden, cmd)
+		}
+		if got.selectedIndex != selectedIndex {
+			t.Fatalf("%dgg moved selection from %d to %d", hidden, selectedIndex, got.selectedIndex)
+		}
+		if got.active != active {
+			t.Fatalf("%dgg changed active from %+v to %+v", hidden, active, got.active)
+		}
+		wantStatus := fmt.Sprintf("page %d is not in current page list", hidden)
+		if !strings.Contains(got.footerLine(), wantStatus) {
+			t.Fatalf("%dgg footer = %q, want %q", hidden, got.footerLine(), wantStatus)
+		}
+		if got.numericPrefix != "" || got.pendingG {
+			t.Fatalf("%dgg left numeric state prefix=%q pendingG=%v", hidden, got.numericPrefix, got.pendingG)
+		}
+	})
+
+	t.Run("out of range", func(t *testing.T) {
+		t.Parallel()
+
+		m, inspector := newFixtureModel(t, "companies.db")
+		m = indexAll(t, m, inspector)
+		m.focusedPane = navPane
+		if !m.selectFirstKind(navPage) {
+			t.Fatal("setup: no page rows")
+		}
+		selectedIndex := m.selectedIndex
+		active := m.active
+		target := m.db.FirstPageID + m.db.PageCount
+
+		got, cmd := updateKeySequence(t, m, directGGKeys(fmt.Sprint(target))...)
+		if cmd != nil {
+			t.Fatalf("%dgg returned cmd %v, want nil", target, cmd)
+		}
+		if got.selectedIndex != selectedIndex {
+			t.Fatalf("%dgg moved selection from %d to %d", target, selectedIndex, got.selectedIndex)
+		}
+		if got.active != active {
+			t.Fatalf("%dgg changed active from %+v to %+v", target, active, got.active)
+		}
+		wantStatus := fmt.Sprintf("page %d is not in current page list", target)
+		if !strings.Contains(got.footerLine(), wantStatus) {
+			t.Fatalf("%dgg footer = %q, want %q", target, got.footerLine(), wantStatus)
+		}
+	})
+}
+
+func TestBTreeListDirectJumpActivatesVisibleRow(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(30)
+
+	got, cmd := updateKeySequence(t, m, "1", "2", "g", "g")
+	if cmd != nil {
+		t.Fatalf("12gg on b-tree list returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != 11 {
+		t.Fatalf("12gg selected index %d, want 11", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:11" {
+		t.Fatalf("12gg active = %+v, want table:11", got.active)
+	}
+	if got.numericPrefix != "" || got.pendingG {
+		t.Fatalf("12gg left numeric state prefix=%q pendingG=%v", got.numericPrefix, got.pendingG)
+	}
+}
+
+func TestBTreeListDirectJumpFailuresPreserveSelection(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{"0", "31"} {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+
+			m := syntheticBTreeListModel(30)
+			m.selectedIndex = 5
+			m.active = contentTarget{kind: navTable, schemaName: "table_05", schemaID: "table:05"}
+			active := m.active
+
+			got, cmd := updateKeySequence(t, m, directGGKeys(target)...)
+			if cmd != nil {
+				t.Fatalf("%sgg returned cmd %v, want nil", target, cmd)
+			}
+			if got.selectedIndex != m.selectedIndex {
+				t.Fatalf("%sgg moved selection from %d to %d", target, m.selectedIndex, got.selectedIndex)
+			}
+			if got.active != active {
+				t.Fatalf("%sgg changed active from %+v to %+v", target, active, got.active)
+			}
+			wantStatus := fmt.Sprintf("b-tree %s is not in current b-tree list", target)
+			if !strings.Contains(got.footerLine(), wantStatus) {
+				t.Fatalf("%sgg footer = %q, want %q", target, got.footerLine(), wantStatus)
+			}
+			if got.numericPrefix != "" || got.pendingG {
+				t.Fatalf("%sgg left numeric state prefix=%q pendingG=%v", target, got.numericPrefix, got.pendingG)
+			}
+		})
 	}
 }
 
@@ -2714,6 +2920,64 @@ func TestNavigationSectionsRenderAsSeparateFrames(t *testing.T) {
 	}
 }
 
+func TestBTreeRowsShowVisibleRowNumbers(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(12)
+	m.selectedIndex = 3
+
+	nav := stripANSI(m.viewNavigationSection(32, 10, "B-Trees"))
+	for _, want := range []string{" 1  ▦ table_00", " 2  ▦ table_01", " 3  ▦ table_02"} {
+		if !strings.Contains(nav, want) {
+			t.Fatalf("B-TREES view missing row number text %q:\n%s", want, nav)
+		}
+	}
+	if !strings.Contains(nav, ">   ▦ table_03") {
+		t.Fatalf("selected B-TREES row should replace the right-aligned number slot:\n%s", nav)
+	}
+}
+
+func TestPageRowsUseOriginalPageLabels(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(1)
+	m.navItems = []navItem{
+		{kind: navTable, title: "table_00", schema: &schemaObjectViewModel{Name: "table_00", Kind: storage.BTreeTable}},
+		{kind: navPage, title: "page 8", pageNumber: 8},
+		{kind: navPage, title: "page 9", pageNumber: 9},
+		{kind: navPage, title: "page 10", pageNumber: 10},
+	}
+	m.selectedIndex = 2
+
+	nav := stripANSI(m.viewNavigationSection(24, 8, "Pages"))
+	for _, want := range []string{"page 8", "page 9", "page 10"} {
+		if !strings.Contains(nav, want) {
+			t.Fatalf("PAGES view missing original page label %q:\n%s", want, nav)
+		}
+	}
+}
+
+func TestSourceMarkerSelectionHighlightIsCursorLocal(t *testing.T) {
+	t.Parallel()
+
+	selectedBg := fmt.Sprint(selectedNavItemStyle.GetBackground())
+	if got := fmt.Sprint(navSourceSelectedMarkerStyle.GetBackground()); got != selectedBg {
+		t.Fatalf("selected source marker background = %s, want selected row background %s", got, selectedBg)
+	}
+	if got := fmt.Sprint(navSourceMarkerStyle.GetBackground()); got == selectedBg {
+		t.Fatalf("plain source marker background = %s, want no selected row background", got)
+	}
+
+	selectedSource := renderNavLine(selectedNavItemStyle, 24, "▶", "2  ", "▦ companies", true)
+	if got := stripANSI(selectedSource); !strings.Contains(got, "▶  ▦ companies") {
+		t.Fatalf("selected source row layout = %q, want marker in number slot", got)
+	}
+	sourceOnly := renderNavLine(navItemStyle, 24, "▶", "2  ", "▦ companies", false)
+	if got := stripANSI(sourceOnly); !strings.Contains(got, "▶  ▦ companies") {
+		t.Fatalf("source-only row layout = %q, want marker in number slot", got)
+	}
+}
+
 func TestContentPaneTitlesShowJumpKeys(t *testing.T) {
 	t.Parallel()
 
@@ -2797,9 +3061,9 @@ func TestStartsOnVisibleBTreeRow(t *testing.T) {
 		t.Fatalf("active target = %+v, want sqlite_schema table", m.active)
 	}
 
-	view := m.View()
-	if !strings.Contains(view, "> sqlite_schema") {
-		t.Fatal("navigation does not render the selected system catalog as bare sqlite_schema")
+	view := stripANSI(m.View())
+	if !strings.Contains(view, ">  sqlite_schema") {
+		t.Fatal("navigation does not render the selected system catalog with row number")
 	}
 }
 
@@ -2815,7 +3079,7 @@ func TestNavRowsKeepStableWidthAcrossBTreeKinds(t *testing.T) {
 			continue
 		}
 		m.selectedIndex = indexOfBTreeRow(m.navItems, *item.schema)
-		line := renderNavLine(selectedNavItemStyle, width, m.navMarker(m.selectedIndex), navSchemaRowText(*item.schema))
+		line := renderNavLine(selectedNavItemStyle, width, m.navMarker(m.selectedIndex), "1  ", navSchemaRowText(*item.schema), true)
 		rowWidths = append(rowWidths, lipgloss.Width(line))
 	}
 	if len(rowWidths) < 3 {

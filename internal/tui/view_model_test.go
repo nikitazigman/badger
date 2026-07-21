@@ -57,6 +57,19 @@ func TestDatabaseViewModelIncludesBucketItemsInBTrees(t *testing.T) {
 	}
 }
 
+func TestNavSchemaRowTextMovesBucketIndentBeforeIcon(t *testing.T) {
+	t.Parallel()
+
+	row := navSchemaRowText(schemaObjectViewModel{
+		Kind: storage.BTreeBucket,
+		Type: string(storage.BTreeBucket),
+		Name: "  nested",
+	})
+	if row != "  ▦ nested" {
+		t.Fatalf("nested bucket row = %q, want indent before icon and one icon/name space", row)
+	}
+}
+
 func TestPageSummariesDoNotLabelPageNavRows(t *testing.T) {
 	t.Parallel()
 
