@@ -8,6 +8,7 @@ type BTreePage struct {
 
 	Classification PageClassification
 	ContinuationOf *PageID
+	OverflowExtent *OverflowExtent
 
 	MetaPayload *MetaPayload
 
@@ -88,6 +89,17 @@ const (
 type PageSummary struct {
 	ID             PageID
 	Classification PageClassification
+	OverflowExtent *OverflowExtent
+}
+
+type OverflowExtent struct {
+	Parent    PageID
+	Page      PageID
+	Start     PageID
+	End       PageID
+	PartIndex uint32
+	PartCount uint32
+	Span      Meta
 }
 
 type PageHeader struct {

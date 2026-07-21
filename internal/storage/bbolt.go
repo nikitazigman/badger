@@ -12,19 +12,20 @@ import (
 )
 
 const (
-	blockMetaPayload       = "meta_payload"
-	blockFreelistPayload   = "freelist_payload"
-	blockFreelistID        = "freelist_id"
-	blockBranchDescriptors = "branch_descriptors"
-	blockBranchEntry       = "branch_entry"
-	blockBranchDescriptor  = "branch_descriptor"
-	blockLeafDescriptors   = "leaf_descriptors"
-	blockLeafEntry         = "leaf_entry"
-	blockLeafDescriptor    = "leaf_descriptor"
-	blockLeafKey           = "leaf_key"
-	blockLeafValue         = "leaf_value"
-	blockBucketHeader      = "bucket_header"
-	blockInlineBucketPage  = "inline_bucket_page"
+	blockMetaPayload         = "meta_payload"
+	blockFreelistPayload     = "freelist_payload"
+	blockFreelistID          = "freelist_id"
+	blockBranchDescriptors   = "branch_descriptors"
+	blockBranchEntry         = "branch_entry"
+	blockBranchDescriptor    = "branch_descriptor"
+	blockLeafDescriptors     = "leaf_descriptors"
+	blockLeafEntry           = "leaf_entry"
+	blockLeafDescriptor      = "leaf_descriptor"
+	blockLeafKey             = "leaf_key"
+	blockLeafValue           = "leaf_value"
+	blockBucketHeader        = "bucket_header"
+	blockInlineBucketPage    = "inline_bucket_page"
+	blockBboltOverflowExtent = "bbolt_overflow_extent"
 )
 
 type bboltDatabase struct {
@@ -257,6 +258,7 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 		{Label: "Page size", Value: fmt.Sprintf("%d bytes", pageSize)},
 		{Label: "File offset", Value: strconv.FormatUint(offset, 10)},
 	}
+	blocks := []HexBlock{}
 
 	if page.Classification == bbolt.PageClassFree {
 		rows = append(rows,
@@ -264,11 +266,15 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 			Field{Label: "Note", Value: "free page; bytes may contain stale data"},
 		)
 	}
-	if page.Classification == bbolt.PageClassContinuation && page.ContinuationOf != nil {
+	if page.OverflowExtent != nil {
+		rows = append(rows, bboltOverflowExtentRows(*page.OverflowExtent)...)
+		if page.OverflowExtent.PartIndex > 1 {
+			blocks = append(blocks, bboltOverflowExtentBlock(*page.OverflowExtent))
+		}
+	} else if page.Classification == bbolt.PageClassContinuation && page.ContinuationOf != nil {
 		rows = append(rows, Field{Label: "Continuation of", Value: strconv.FormatUint(uint64(*page.ContinuationOf), 10)})
 	}
 
-	blocks := []HexBlock{}
 	if page.HasHeader {
 		rows = append(rows,
 			Blank(),
@@ -409,6 +415,46 @@ func adaptBboltPage(page *bbolt.BTreePage) *PageInspection {
 		Rows:      rows,
 		HexBlocks: blocks,
 	}
+}
+
+func bboltOverflowExtentRows(extent bbolt.OverflowExtent) []Field {
+	rows := []Field{
+		Blank(),
+		Section("OVERFLOW"),
+		{Label: "Overflow role", Value: bboltOverflowRole(extent)},
+		{Label: "Parent page", Value: strconv.FormatUint(uint64(extent.Parent), 10)},
+		{Label: "Overflow part", Value: fmt.Sprintf("%d of %d", extent.PartIndex, extent.PartCount), Span: bboltSpanPtr(extent.Span)},
+		{Label: "Logical extent", Value: fmt.Sprintf("pages %d-%d", extent.Start, extent.End)},
+	}
+	if extent.PartIndex > 1 {
+		rows = append(rows, Field{Label: "Continuation of", Value: strconv.FormatUint(uint64(extent.Parent), 10)})
+	}
+	return rows
+}
+
+func bboltOverflowExtentBlock(extent bbolt.OverflowExtent) HexBlock {
+	return HexBlock{
+		ID:    "bbolt-overflow-extent",
+		Kind:  blockBboltOverflowExtent,
+		Title: "Overflow Extent",
+		Span:  bboltSpanFromMeta(extent.Span),
+		Rows: []Field{
+			{Label: "Overflow Extent", Value: ""},
+			{Label: "Role", Value: bboltOverflowRole(extent)},
+			{Label: "Parent page", Value: strconv.FormatUint(uint64(extent.Parent), 10)},
+			{Label: "Selected page", Value: strconv.FormatUint(uint64(extent.Page), 10)},
+			{Label: "Overflow part", Value: fmt.Sprintf("%d of %d", extent.PartIndex, extent.PartCount)},
+			{Label: "Logical extent", Value: fmt.Sprintf("pages %d-%d", extent.Start, extent.End)},
+			{Label: "Selected physical span", Value: bboltOffsetRange(extent.Span), Span: bboltSpanPtr(extent.Span)},
+		},
+	}
+}
+
+func bboltOverflowRole(extent bbolt.OverflowExtent) string {
+	if extent.PartIndex == 1 {
+		return "overflow parent"
+	}
+	return "overflow continuation"
 }
 
 func adaptBboltBranchPage(page *bbolt.BTreePage) ([]Field, []HexBlock) {

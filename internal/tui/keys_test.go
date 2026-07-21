@@ -1332,10 +1332,9 @@ func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 		t.Fatalf("loaded page has %d blocks, want enough blocks to test scrolling", len(blocks))
 	}
 
-	for idx := 0; idx < len(blocks)-1; idx++ {
-		next, _ = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
-		hex = next.(model)
-	}
+	hex.selectedBlock = len(blocks) - 1
+	hex.blockSelected = true
+	hex.revealSelectedHexBlock()
 	last := blocks[len(blocks)-1]
 	if hex.selectedBlock != len(blocks)-1 {
 		t.Fatalf("selected block %d, want last block %d", hex.selectedBlock, len(blocks)-1)
@@ -1358,6 +1357,158 @@ func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 	wantByte := selectedHexByteStyle.Render(fmt.Sprintf("%02X", hex.currentPage.Raw[last.meta.Start]))
 	if !strings.Contains(rendered, wantByte) {
 		t.Fatalf("selected block byte did not use selected style:\n%s", rendered)
+	}
+}
+
+func TestHexRevealAllowsScrollingWithinLargeSelectedBlock(t *testing.T) {
+	t.Parallel()
+
+	meta := storage.ByteSpan{Start: 0, Size: 4096}
+	if got := revealHexMetaScroll(5, meta, 4); got != 5 {
+		t.Fatalf("scroll inside selected block = %d, want 5", got)
+	}
+	if got := revealHexMetaScroll(300, meta, 4); got != 252 {
+		t.Fatalf("scroll past selected block = %d, want 252", got)
+	}
+
+	later := storage.ByteSpan{Start: 160, Size: 4096}
+	if got := revealHexMetaScroll(0, later, 4); got != 10 {
+		t.Fatalf("scroll before selected block = %d, want selected start row 10", got)
+	}
+}
+
+func TestHexPaneScrollsWhenSingleLargeBlockCannotMoveSelection(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]byte, 4096)
+	m := model{
+		active:        contentTarget{kind: navPage, pageNumber: 7},
+		currentPage:   &storage.PageInspection{Ref: storage.PageRef{ID: 7}, Raw: raw, HexBlocks: []storage.HexBlock{{Kind: "bbolt_overflow_extent", Title: "Overflow Extent", Span: storage.ByteSpan{Start: 0, Size: len(raw)}}}},
+		navItems:      []navItem{{kind: navPage, title: "page 7", pageNumber: 7}},
+		focusedPane:   explorerPane,
+		selectedBlock: 0,
+		blockSelected: true,
+		height:        8,
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	scrolled := next.(model)
+	if cmd != nil {
+		t.Fatal("hex down returned a command")
+	}
+	if scrolled.selectedBlock != 0 || !scrolled.blockSelected {
+		t.Fatalf("hex down changed selected block to (%v, %d)", scrolled.blockSelected, scrolled.selectedBlock)
+	}
+	if scrolled.hexScroll != 1 {
+		t.Fatalf("hex down scroll = %d, want 1", scrolled.hexScroll)
+	}
+
+	next, _ = scrolled.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	paged := next.(model)
+	if paged.hexScroll != 9 {
+		t.Fatalf("hex pgdown scroll = %d, want 9", paged.hexScroll)
+	}
+	track := strings.Join(paged.hexScrollbarTrack(6), "\n")
+	if !strings.Contains(track, "│") || !strings.Contains(track, "█") {
+		t.Fatalf("hex viewport did not expose scrollbar track:\n%s", track)
+	}
+}
+
+func TestHexPaneScrollsWithinLargeSelectedBlockBeforeMovingSelection(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]byte, 8192)
+	m := model{
+		active: contentTarget{kind: navPage, pageNumber: 7},
+		currentPage: &storage.PageInspection{
+			Ref: storage.PageRef{ID: 7},
+			Raw: raw,
+			HexBlocks: []storage.HexBlock{
+				{Kind: "leaf_value", Title: "Leaf Value", Span: storage.ByteSpan{Start: 0, Size: 4096}},
+				{Kind: "leaf_entry", Title: "Leaf Entry 1", Span: storage.ByteSpan{Start: 4096, Size: 16}},
+			},
+		},
+		navItems:      []navItem{{kind: navPage, title: "page 7", pageNumber: 7}},
+		focusedPane:   explorerPane,
+		selectedBlock: 0,
+		blockSelected: true,
+		height:        8,
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	scrolled := next.(model)
+	if cmd != nil {
+		t.Fatal("hex down returned a command")
+	}
+	if scrolled.selectedBlock != 0 {
+		t.Fatalf("hex down selected block %d, want to stay on large block", scrolled.selectedBlock)
+	}
+	if scrolled.hexScroll != 1 {
+		t.Fatalf("hex down scroll = %d, want 1", scrolled.hexScroll)
+	}
+
+	scrolled.hexScroll = 253
+	next, _ = scrolled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	moved := next.(model)
+	if moved.selectedBlock != 1 {
+		t.Fatalf("hex down at selected block end selected block %d, want 1", moved.selectedBlock)
+	}
+}
+
+func TestHexPaneScrollsWithinLargeSelectedDrillChildBeforeMovingSelection(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]byte, 8192)
+	m := model{
+		active: contentTarget{kind: navPage, pageNumber: 7},
+		currentPage: &storage.PageInspection{
+			Ref: storage.PageRef{ID: 7},
+			Raw: raw,
+			HexBlocks: []storage.HexBlock{{
+				Kind:  "leaf_entry",
+				Title: "Leaf Entry",
+				Span:  storage.ByteSpan{Start: 0, Size: 4112},
+				Children: []storage.HexBlock{
+					{Kind: "leaf_value", Title: "Leaf Value", Span: storage.ByteSpan{Start: 0, Size: 4096}},
+					{Kind: "leaf_key", Title: "Leaf Key", Span: storage.ByteSpan{Start: 4096, Size: 16}},
+				},
+			}},
+		},
+		navItems:      []navItem{{kind: navPage, title: "page 7", pageNumber: 7}},
+		focusedPane:   explorerPane,
+		selectedBlock: 0,
+		blockSelected: true,
+		drill: drillState{
+			active:      true,
+			parentBlock: 0,
+			stack: []drillFrame{{
+				title: "Leaf Entry",
+				children: []drillChild{
+					{kind: "leaf_value", title: "Leaf Value", meta: storage.ByteSpan{Start: 0, Size: 4096}},
+					{kind: "leaf_key", title: "Leaf Key", meta: storage.ByteSpan{Start: 4096, Size: 16}},
+				},
+			}},
+		},
+		height: 8,
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	scrolled := next.(model)
+	if cmd != nil {
+		t.Fatal("hex down returned a command")
+	}
+	if selected := scrolled.drill.stack[0].selectedChild; selected != 0 {
+		t.Fatalf("hex down selected drill child %d, want to stay on large child", selected)
+	}
+	if scrolled.hexScroll != 1 {
+		t.Fatalf("hex down scroll = %d, want 1", scrolled.hexScroll)
+	}
+
+	scrolled.hexScroll = 253
+	next, _ = scrolled.Update(tea.KeyMsg{Type: tea.KeyDown})
+	moved := next.(model)
+	if selected := moved.drill.stack[0].selectedChild; selected != 1 {
+		t.Fatalf("hex down at selected child end selected child %d, want 1", selected)
 	}
 }
 

@@ -9,12 +9,12 @@ import (
 )
 
 type Inspector struct {
-	path          string
-	file          *os.File
-	config        BboltConfig
-	freePages     map[PageID]bool
-	pageSummaries []PageSummary
-	continuations map[PageID]PageID
+	path            string
+	file            *os.File
+	config          BboltConfig
+	freePages       map[PageID]bool
+	pageSummaries   []PageSummary
+	overflowExtents map[PageID]OverflowExtent
 }
 type BboltConfig struct {
 	Version       uint32
@@ -502,8 +502,8 @@ func Open(path string) (*Inspector, error) {
 			HighWaterMark: meta.PageID.Value,
 			TransactionID: meta.TransactionID.Value,
 		},
-		freePages:     map[PageID]bool{},
-		continuations: map[PageID]PageID{},
+		freePages:       map[PageID]bool{},
+		overflowExtents: map[PageID]OverflowExtent{},
 	}
 	if err := inspector.loadPageState(); err != nil {
 		_ = f.Close()
@@ -536,8 +536,16 @@ func (i *Inspector) InspectPage(id PageID) (*BTreePage, error) {
 	}
 
 	page.Classification = i.classificationFor(id, page)
-	if owner, ok := i.continuations[id]; ok {
+	if extent, ok := i.overflowExtents[id]; ok && extent.PartIndex > 1 {
+		owner := extent.Parent
 		page.ContinuationOf = &owner
+	}
+	if extent, ok := i.overflowExtents[id]; ok {
+		page.OverflowExtent = overflowExtentPtr(extent)
+		if page.Classification == PageClassContinuation {
+			page.HasHeader = false
+			page.Header = PageHeader{}
+		}
 	}
 
 	if page.Classification == PageClassTruncated || !page.HasHeader {
@@ -635,41 +643,63 @@ func (i *Inspector) loadFreelist() error {
 
 func (i *Inspector) buildPageSummaries() []PageSummary {
 	summaries := make([]PageSummary, 0, i.config.HighWaterMark)
-	i.continuations = map[PageID]PageID{}
+	i.overflowExtents = map[PageID]OverflowExtent{}
 
 	for id := PageID(0); id < i.config.HighWaterMark; id++ {
 		if i.freePages[id] {
 			summaries = append(summaries, PageSummary{ID: id, Classification: PageClassFree})
 			continue
 		}
-		if _, ok := i.continuations[id]; ok {
-			summaries = append(summaries, PageSummary{ID: id, Classification: PageClassContinuation})
+		if extent, ok := i.overflowExtents[id]; ok && extent.PartIndex > 1 {
+			summaries = append(summaries, PageSummary{ID: id, Classification: PageClassContinuation, OverflowExtent: overflowExtentPtr(extent)})
 			continue
 		}
 
 		page, err := i.readPhysicalPage(id)
 		classification := PageClassUnknown
+		var overflow *OverflowExtent
 		if err != nil || page.Classification == PageClassTruncated {
 			classification = PageClassTruncated
 		} else if page.HasHeader {
 			classification = classificationForFlag(page.Header.Flags.Value)
 			if isActiveLogicalClassification(classification) {
-				for n := uint32(1); n <= page.Header.Overflow.Value; n++ {
-					continuationID := id + PageID(n)
-					if continuationID >= i.config.HighWaterMark {
-						break
-					}
-					if i.freePages[continuationID] {
-						continue
-					}
-					i.continuations[continuationID] = id
-				}
+				overflow = i.recordOverflowExtent(id, page.Header.Overflow.Value)
 			}
 		}
-		summaries = append(summaries, PageSummary{ID: id, Classification: classification})
+		summaries = append(summaries, PageSummary{ID: id, Classification: classification, OverflowExtent: overflow})
 	}
 
 	return summaries
+}
+
+func (i *Inspector) recordOverflowExtent(parent PageID, overflow uint32) *OverflowExtent {
+	if overflow == 0 {
+		return nil
+	}
+	partCount := overflow + 1
+	last := parent + PageID(overflow)
+	for n := uint32(0); n < partCount; n++ {
+		pageID := parent + PageID(n)
+		if pageID >= i.config.HighWaterMark {
+			break
+		}
+		if i.freePages[pageID] {
+			continue
+		}
+		i.overflowExtents[pageID] = OverflowExtent{
+			Parent:    parent,
+			Page:      pageID,
+			Start:     parent,
+			End:       last,
+			PartIndex: n + 1,
+			PartCount: partCount,
+			Span:      metaFromOffset(0, int(i.config.PageSize)),
+		}
+	}
+	if extent, ok := i.overflowExtents[parent]; ok {
+		return overflowExtentPtr(extent)
+	}
+	return nil
 }
 
 func (i *Inspector) readPhysicalPage(id PageID) (*BTreePage, error) {
@@ -740,7 +770,7 @@ func (i *Inspector) classificationFor(id PageID, page *BTreePage) PageClassifica
 	if i.freePages[id] {
 		return PageClassFree
 	}
-	if _, ok := i.continuations[id]; ok {
+	if extent, ok := i.overflowExtents[id]; ok && extent.PartIndex > 1 {
 		return PageClassContinuation
 	}
 	if page == nil {
@@ -753,6 +783,11 @@ func (i *Inspector) classificationFor(id PageID, page *BTreePage) PageClassifica
 		return PageClassUnknown
 	}
 	return classificationForFlag(page.Header.Flags.Value)
+}
+
+func overflowExtentPtr(extent OverflowExtent) *OverflowExtent {
+	copied := extent
+	return &copied
 }
 
 func classificationForFlag(flag FlagType) PageClassification {

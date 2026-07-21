@@ -79,13 +79,19 @@ func revealHexMetaScroll(scroll int, meta storage.ByteSpan, dataRows int) int {
 	}
 	startRow := meta.Start / 16
 	endRow := max(startRow, (meta.End()-1)/16)
+	if endRow-startRow+1 >= dataRows {
+		if scroll < startRow {
+			return startRow
+		}
+		return min(scroll, endRow-dataRows+1)
+	}
 	if startRow < scroll {
 		return startRow
 	}
+	if startRow >= scroll+dataRows {
+		return startRow
+	}
 	if endRow >= scroll+dataRows {
-		if endRow-startRow+1 >= dataRows {
-			return startRow
-		}
 		return endRow - dataRows + 1
 	}
 	return scroll

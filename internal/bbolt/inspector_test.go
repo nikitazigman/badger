@@ -457,6 +457,77 @@ func TestGeneratedOverflowFixtureHasContinuationPages(t *testing.T) {
 	}
 }
 
+func TestOverflowContinuationInspectionReportsExtentParts(t *testing.T) {
+	t.Parallel()
+
+	inspector, err := Open(fixturePath("overflow.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := inspector.Close(); err != nil {
+			t.Fatalf("close inspector: %v", err)
+		}
+	})
+
+	var continuation PageSummary
+	found := false
+	for _, summary := range inspector.PageSummaries() {
+		if summary.Classification != PageClassContinuation || summary.OverflowExtent == nil {
+			continue
+		}
+		continuation = summary
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("overflow fixture did not expose a continuation extent")
+	}
+	if continuation.OverflowExtent.PartIndex <= 1 {
+		t.Fatalf("continuation part index = %d, want > 1", continuation.OverflowExtent.PartIndex)
+	}
+	if continuation.OverflowExtent.PartCount < continuation.OverflowExtent.PartIndex {
+		t.Fatalf("continuation part = %d of %d, want part within extent", continuation.OverflowExtent.PartIndex, continuation.OverflowExtent.PartCount)
+	}
+
+	parent, err := inspector.InspectPage(continuation.OverflowExtent.Parent)
+	if err != nil {
+		t.Fatalf("InspectPage(parent) returned error: %v", err)
+	}
+	if parent.OverflowExtent == nil {
+		t.Fatal("overflow parent missing extent metadata")
+	}
+	if parent.OverflowExtent.PartIndex != 1 {
+		t.Fatalf("parent part index = %d, want 1", parent.OverflowExtent.PartIndex)
+	}
+	if parent.OverflowExtent.PartCount != continuation.OverflowExtent.PartCount {
+		t.Fatalf("parent part count = %d, continuation part count = %d", parent.OverflowExtent.PartCount, continuation.OverflowExtent.PartCount)
+	}
+
+	page, err := inspector.InspectPage(continuation.ID)
+	if err != nil {
+		t.Fatalf("InspectPage(continuation) returned error: %v", err)
+	}
+	if page.Classification != PageClassContinuation {
+		t.Fatalf("classification = %q, want %q", page.Classification, PageClassContinuation)
+	}
+	if page.HasHeader {
+		t.Fatal("continuation page exposed an independent page header")
+	}
+	if page.ContinuationOf == nil || *page.ContinuationOf != continuation.OverflowExtent.Parent {
+		t.Fatalf("ContinuationOf = %v, want %d", page.ContinuationOf, continuation.OverflowExtent.Parent)
+	}
+	if page.OverflowExtent == nil {
+		t.Fatal("continuation inspection missing extent metadata")
+	}
+	if page.OverflowExtent.PartIndex != continuation.OverflowExtent.PartIndex {
+		t.Fatalf("inspected part index = %d, summary part index = %d", page.OverflowExtent.PartIndex, continuation.OverflowExtent.PartIndex)
+	}
+	if page.OverflowExtent.Span.StartOffset != 0 || page.OverflowExtent.Span.Size != int(inspector.Config().PageSize) {
+		t.Fatalf("continuation span = %+v, want selected physical page", page.OverflowExtent.Span)
+	}
+}
+
 func TestInspectBranchPageParsesBranchElements(t *testing.T) {
 	t.Parallel()
 

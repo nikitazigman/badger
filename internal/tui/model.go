@@ -349,9 +349,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.activateSelected()
 			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage && m.drill.active {
-			m.moveDrillChild(-1)
+			if !m.scrollSelectedHexRegion(-1, 1) && !m.moveDrillChild(-1) {
+				m.scrollHex(-1, 1)
+			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
-			m.moveHexBlock(-1)
+			if !m.scrollSelectedHexRegion(-1, 1) && !m.moveHexBlock(-1) {
+				m.scrollHex(-1, 1)
+			}
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(-1, 1)
 		}
@@ -362,20 +366,28 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.activateSelected()
 			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage && m.drill.active {
-			m.moveDrillChild(1)
+			if !m.scrollSelectedHexRegion(1, 1) && !m.moveDrillChild(1) {
+				m.scrollHex(1, 1)
+			}
 		} else if m.focusedPane == explorerPane && m.active.kind == navPage {
-			m.moveHexBlock(1)
+			if !m.scrollSelectedHexRegion(1, 1) && !m.moveHexBlock(1) {
+				m.scrollHex(1, 1)
+			}
 		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(1, 1)
 		}
 		return m, nil
 	case "pgup":
-		if m.focusedPane == inspectorPane {
+		if m.focusedPane == explorerPane && m.active.kind == navPage {
+			m.scrollHex(-1, 8)
+		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(-1, 8)
 		}
 		return m, nil
 	case "pgdown":
-		if m.focusedPane == inspectorPane {
+		if m.focusedPane == explorerPane && m.active.kind == navPage {
+			m.scrollHex(1, 8)
+		} else if m.focusedPane == inspectorPane {
 			m.scrollInspector(1, 8)
 		}
 		return m, nil
@@ -454,6 +466,60 @@ func (m *model) scrollInspector(direction int, amount int) {
 	}
 }
 
+func (m *model) scrollHex(direction int, amount int) {
+	if amount < 1 {
+		amount = 1
+	}
+	if m.currentPage == nil {
+		return
+	}
+	dataRows := m.hexDataRows()
+	rawRows := (len(m.currentPage.Raw) + 15) / 16
+	maxScroll := max(0, rawRows-dataRows)
+	m.hexScroll = clamp(m.hexScroll+direction*amount, 0, maxScroll)
+}
+
+func (m *model) scrollSelectedHexRegion(direction int, amount int) bool {
+	if amount < 1 {
+		amount = 1
+	}
+	if m.currentPage == nil || len(m.currentPage.Raw) == 0 {
+		return false
+	}
+	blocks := buildPageBlocks(m.currentPage)
+	meta, ok := m.selectedHexMeta(blocks)
+	if !ok || meta.Size <= 0 {
+		return false
+	}
+
+	dataRows := m.hexDataRows()
+	if dataRows <= 0 {
+		return false
+	}
+	startRow := meta.Start / 16
+	endRow := max(startRow, (meta.End()-1)/16)
+	selectedRows := endRow - startRow + 1
+	if selectedRows <= dataRows || selectedRows <= dataRows*4 {
+		return false
+	}
+
+	rawRows := (len(m.currentPage.Raw) + 15) / 16
+	maxScroll := max(0, rawRows-dataRows)
+	current := revealHexMetaScroll(clamp(m.hexScroll, 0, maxScroll), meta, dataRows)
+	minWithin := startRow
+	maxWithin := min(maxScroll, endRow-dataRows+1)
+	switch {
+	case direction > 0 && current < maxWithin:
+		m.hexScroll = min(current+amount, maxWithin)
+		return true
+	case direction < 0 && current > minWithin:
+		m.hexScroll = max(current-amount, minWithin)
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *model) resetHexSelection() {
 	m.selectedBlock = 0
 	m.blockSelected = false
@@ -522,26 +588,27 @@ func (m *model) validateDrillSelection() {
 	}
 }
 
-func (m *model) moveHexBlock(delta int) {
+func (m *model) moveHexBlock(delta int) bool {
 	blocks := m.currentPageBlocks()
 	if len(blocks) == 0 {
 		m.resetHexSelection()
-		return
+		return true
 	}
 	if !m.blockSelected {
 		m.selectedBlock = 0
 		m.blockSelected = true
 		m.inspectorScroll = 0
 		m.revealSelectedHexBlock()
-		return
+		return true
 	}
 	next := clamp(m.selectedBlock+delta, 0, len(blocks)-1)
 	if next == m.selectedBlock {
-		return
+		return false
 	}
 	m.selectedBlock = next
 	m.inspectorScroll = 0
 	m.revealSelectedHexBlock()
+	return true
 }
 
 func (m *model) drillIn() {
@@ -609,21 +676,22 @@ func (m *model) drillBack() {
 	m.revealSelectedHexBlock()
 }
 
-func (m *model) moveDrillChild(delta int) {
+func (m *model) moveDrillChild(delta int) bool {
 	children := m.currentDrillChildren()
 	if len(children) == 0 {
 		m.drill = drillState{}
-		return
+		return true
 	}
 	m.cloneDrillStack()
 	frame := &m.drill.stack[len(m.drill.stack)-1]
 	next := clamp(frame.selectedChild+delta, 0, len(children)-1)
 	if next == frame.selectedChild {
-		return
+		return false
 	}
 	frame.selectedChild = next
 	m.inspectorScroll = 0
 	m.revealSelectedDrillChild()
+	return true
 }
 
 func (m *model) cloneDrillStack() {
@@ -721,12 +789,14 @@ func (m model) View() string {
 	paneContentHeight := max(0, bodyHeight-2)
 
 	nav := m.viewNavigationColumn(navWidth, bodyHeight)
-	explorer := renderTitledFrame(
+	explorerRows := strings.Split(m.viewExplorer(paneInnerWidth(explorerWidth), paneContentHeight), "\n")
+	explorer := renderTitledFrameWithScrollbar(
 		explorerWidth,
 		bodyHeight,
 		detailFrameTitle(m.detailHeaderText()),
 		m.focusedPane == explorerPane,
-		strings.Split(m.viewExplorer(paneInnerWidth(explorerWidth), paneContentHeight), "\n"),
+		explorerRows,
+		m.hexScrollbarTrack(paneContentHeight),
 	)
 	inspector := renderTitledFrame(
 		inspectorWidth,
@@ -949,6 +1019,10 @@ func (m model) visibleNavSection(section string, height int) []visibleNavRow {
 }
 
 func renderTitledFrame(width int, height int, title string, active bool, rows []string) string {
+	return renderTitledFrameWithScrollbar(width, height, title, active, rows, nil)
+}
+
+func renderTitledFrameWithScrollbar(width int, height int, title string, active bool, rows []string, rightTrack []string) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
@@ -983,7 +1057,11 @@ func renderTitledFrame(width int, height int, title string, active bool, rows []
 			line = truncateCells(rows[idx], contentWidth)
 		}
 		line = lipgloss.PlaceHorizontal(contentWidth, lipgloss.Left, line)
-		lines = append(lines, borderStyle.Render("│")+" "+line+" "+borderStyle.Render("│"))
+		rightBorder := borderStyle.Render("│")
+		if idx < len(rightTrack) {
+			rightBorder = rightTrack[idx]
+		}
+		lines = append(lines, borderStyle.Render("│")+" "+line+" "+rightBorder)
 	}
 	lines = append(lines, borderStyle.Render("└"+strings.Repeat("─", innerWidth)+"┘"))
 	return strings.Join(lines, "\n")
@@ -1486,6 +1564,17 @@ func renderScrollbar(lines []string, contentWidth int, height int, scroll int, m
 		return ""
 	}
 
+	track := scrollbarTrack(height, scroll, maxScroll)
+
+	out := make([]string, 0, height)
+	for idx := 0; idx < height; idx++ {
+		padded := lipgloss.NewStyle().Width(contentWidth).Render(lines[idx])
+		out = append(out, padded+" "+track[idx])
+	}
+	return strings.Join(out, "\n")
+}
+
+func scrollbarTrack(height int, scroll int, maxScroll int) []string {
 	track := make([]string, height)
 	for idx := range track {
 		track[idx] = scrollbarTrackStyle.Render("│")
@@ -1504,13 +1593,7 @@ func renderScrollbar(lines []string, contentWidth int, height int, scroll int, m
 	for idx := 0; idx < thumbSize && thumbStart+idx < height; idx++ {
 		track[thumbStart+idx] = scrollbarThumbStyle.Render("█")
 	}
-
-	out := make([]string, 0, height)
-	for idx := 0; idx < height; idx++ {
-		padded := lipgloss.NewStyle().Width(contentWidth).Render(lines[idx])
-		out = append(out, padded+" "+track[idx])
-	}
-	return strings.Join(out, "\n")
+	return track
 }
 
 func (m model) renderHexRows(width int, height int) []string {
@@ -1530,9 +1613,9 @@ func (m model) renderHexRows(width int, height int) []string {
 	selectedMeta, hasSelectedMeta := m.selectedHexMeta(blocks)
 	drillChildren := m.currentDrillChildren()
 	dataRows := max(0, height-1)
-	scroll := clamp(m.hexScroll, 0, max(0, (len(raw)+15)/16-dataRows))
-	if hasSelectedMeta {
-		scroll = revealHexMetaScroll(scroll, selectedMeta, dataRows)
+	scroll, _, ok := m.hexViewportScroll(dataRows)
+	if !ok {
+		scroll = 0
 	}
 	for offset := scroll * 16; offset < len(raw) && len(lines) < height; offset += 16 {
 		end := offset + 16
@@ -1542,6 +1625,36 @@ func (m model) renderHexRows(width int, height int) []string {
 		lines = append(lines, truncateCells(formatHexRowWithSelection(offset, raw[offset:end], blocks, selectedMeta, hasSelectedMeta, drillChildren), width))
 	}
 	return lines
+}
+
+func (m model) hexViewportScroll(dataRows int) (int, int, bool) {
+	if m.currentPage == nil || len(m.currentPage.Raw) == 0 {
+		return 0, 0, false
+	}
+	rawRows := (len(m.currentPage.Raw) + 15) / 16
+	maxScroll := max(0, rawRows-dataRows)
+	scroll := clamp(m.hexScroll, 0, maxScroll)
+	blocks := buildPageBlocks(m.currentPage)
+	if selectedMeta, ok := m.selectedHexMeta(blocks); ok {
+		scroll = revealHexMetaScroll(scroll, selectedMeta, dataRows)
+	}
+	return scroll, maxScroll, true
+}
+
+func (m model) hexScrollbarTrack(height int) []string {
+	if m.active.kind != navPage || height <= 0 {
+		return nil
+	}
+	pageNumber := m.inspectorPageNumber()
+	if m.currentPage == nil || m.currentPage.Ref.ID != pageNumber || len(m.currentPage.Raw) == 0 {
+		return nil
+	}
+	dataRows := max(0, height-1)
+	scroll, maxScroll, ok := m.hexViewportScroll(dataRows)
+	if !ok {
+		return nil
+	}
+	return scrollbarTrack(height, scroll, maxScroll)
 }
 
 func (m model) selectedHexMeta(blocks []pageBlock) (storage.ByteSpan, bool) {

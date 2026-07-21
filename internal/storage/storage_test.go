@@ -425,6 +425,138 @@ func TestBboltPageSummariesFreelistAndFreePageRows(t *testing.T) {
 	}
 }
 
+func TestBboltOverflowContinuationInspectionExposesPhysicalPartRows(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(fixturePath(filepath.Join("bbolt", "overflow.db")))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview returned error: %v", err)
+	}
+	var ref PageRef
+	found := false
+	for _, summary := range overview.PageSummaries {
+		if summary.Classification != PageClassContinuation {
+			continue
+		}
+		ref = summary.Ref
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("overflow fixture did not expose a continuation page summary")
+	}
+
+	page, err := db.InspectPage(ref)
+	if err != nil {
+		t.Fatalf("InspectPage(continuation) returned error: %v", err)
+	}
+	if len(page.Raw) != int(overview.PageSizeBytes) {
+		t.Fatalf("continuation raw bytes = %d, want one physical page of %d", len(page.Raw), overview.PageSizeBytes)
+	}
+	if testFieldValue(page.Rows, "Classification") != string(PageClassContinuation) {
+		t.Fatalf("classification row = %q, want %q", testFieldValue(page.Rows, "Classification"), PageClassContinuation)
+	}
+	if testFieldValue(page.Rows, "Overflow role") != "overflow continuation" {
+		t.Fatalf("overflow role row = %q, want overflow continuation", testFieldValue(page.Rows, "Overflow role"))
+	}
+	if testFieldValue(page.Rows, "Continuation of") == "" {
+		t.Fatal("continuation page missing parent page row")
+	}
+	if got := testFieldValue(page.Rows, "Overflow part"); !strings.Contains(got, " of ") {
+		t.Fatalf("overflow part row = %q, want ordinal part label", got)
+	}
+	if testFieldValue(page.Rows, "Logical extent") == "" {
+		t.Fatal("continuation page missing logical extent row")
+	}
+	if block := testHexBlockByKind(page.HexBlocks, blockBboltOverflowExtent); block == nil {
+		t.Fatal("continuation page missing overflow extent hex block")
+	} else {
+		assertByteSpan(t, block.Span, 0, int(overview.PageSizeBytes))
+	}
+	if block := testHexBlockByKind(page.HexBlocks, blockPageHeader); block != nil {
+		t.Fatal("continuation page exposed an independent page-header block")
+	}
+}
+
+func TestBboltOverflowParentDoesNotExposeSelectableOverflowBlock(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(fixturePath(filepath.Join("bbolt", "overflow.db")))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview returned error: %v", err)
+	}
+	for _, summary := range overview.PageSummaries {
+		if summary.Classification == PageClassContinuation {
+			continue
+		}
+		page, err := db.InspectPage(summary.Ref)
+		if err != nil {
+			t.Fatalf("InspectPage(%d) returned error: %v", summary.Ref.ID, err)
+		}
+		if testFieldValue(page.Rows, "Overflow role") != "overflow parent" {
+			continue
+		}
+		if len(page.HexBlocks) == 0 {
+			t.Fatalf("overflow parent page %d has no selectable blocks", summary.Ref.ID)
+		}
+		if page.HexBlocks[0].Kind != blockPageHeader {
+			t.Fatalf("overflow parent first block kind = %q, want %q", page.HexBlocks[0].Kind, blockPageHeader)
+		}
+		if block := testHexBlockByKind(page.HexBlocks, blockBboltOverflowExtent); block != nil {
+			t.Fatalf("overflow parent page %d exposed selectable overflow block", summary.Ref.ID)
+		}
+		return
+	}
+	t.Fatal("overflow fixture did not expose an overflow parent page")
+}
+
+func TestBboltPagesForBTreeIncludesOverflowContinuationPages(t *testing.T) {
+	t.Parallel()
+
+	db, err := Open(fixturePath(filepath.Join("bbolt", "overflow.db")))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview returned error: %v", err)
+	}
+	classifications := map[uint64]PageClassification{}
+	for _, summary := range overview.PageSummaries {
+		classifications[summary.Ref.ID] = summary.Classification
+	}
+
+	for _, item := range overview.BTrees {
+		if item.RootPage == nil {
+			continue
+		}
+		pages, err := db.PagesForBTree(item.ID)
+		if err != nil {
+			t.Fatalf("PagesForBTree(%s) returned error: %v", item.ID, err)
+		}
+		for _, ref := range pages {
+			if classifications[ref.ID] == PageClassContinuation {
+				return
+			}
+		}
+	}
+	t.Fatal("no filtered bbolt bucket included an overflow continuation page")
+}
+
 func TestBboltLeafPageInspectionExposesLeafRowsAndBlocks(t *testing.T) {
 	t.Parallel()
 

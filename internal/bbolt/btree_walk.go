@@ -46,7 +46,7 @@ func (i *Inspector) PagesForRoot(root PageID) (PageWalk, error) {
 }
 
 func (i *Inspector) walkBucketBTree(inspection *BTreePage, walk *PageWalk, visited map[PageID]bool) {
-	walk.Pages = append(walk.Pages, inspection.ID)
+	i.appendLogicalPageExtent(inspection, walk, visited)
 
 	if inspection.Classification != PageClassBranch || inspection.BranchPayload == nil {
 		return
@@ -91,6 +91,23 @@ func (i *Inspector) walkBucketBTree(inspection *BTreePage, walk *PageWalk, visit
 			continue
 		}
 		i.walkBucketBTree(childInspection, walk, visited)
+	}
+}
+
+func (i *Inspector) appendLogicalPageExtent(inspection *BTreePage, walk *PageWalk, visited map[PageID]bool) {
+	walk.Pages = append(walk.Pages, inspection.ID)
+	if inspection.OverflowExtent == nil || inspection.OverflowExtent.PartIndex != 1 {
+		return
+	}
+	for pageID := inspection.OverflowExtent.Start + 1; pageID <= inspection.OverflowExtent.End; pageID++ {
+		if pageID >= i.config.HighWaterMark || i.freePages[pageID] {
+			continue
+		}
+		if visited[pageID] {
+			continue
+		}
+		walk.Pages = append(walk.Pages, pageID)
+		visited[pageID] = true
 	}
 }
 
