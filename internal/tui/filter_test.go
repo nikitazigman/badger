@@ -391,7 +391,7 @@ func TestFilterRenderFooterAndMarkers(t *testing.T) {
 	companies := objectByName(t, m.db, "companies")
 	m.applyFilter(companies) // cursor lands on the companies row
 
-	view := m.View()
+	view := stripANSI(m.View())
 	if !strings.Contains(view, "⦿ filtered: ▦ companies") {
 		t.Fatalf("View missing filter footer token; got footer build %q", m.filterToken())
 	}
@@ -400,13 +400,13 @@ func TestFilterRenderFooterAndMarkers(t *testing.T) {
 	}
 	m.focusedPane = explorerPane
 	if strings.Contains(m.footerLine(), "f clear/switch") || strings.Contains(m.footerLine(), "f filter") {
-		t.Fatalf("footer shows filter hint outside view 1: %q", m.footerLine())
+		t.Fatalf("footer shows filter hint outside B-TREES: %q", m.footerLine())
 	}
 	// The cursor is on the source row → a single ▶ marker, never '> ▶'.
 	if strings.Contains(view, "> ▶") || strings.Contains(view, "▶ >") {
 		t.Fatal("source row shows a double marker; want a single ▶")
 	}
-	if !strings.Contains(view, "▶ ▦ companies") {
+	if !strings.Contains(view, "▶  ▦ companies") {
 		t.Fatal("source row missing the solid ▶ marker")
 	}
 }
