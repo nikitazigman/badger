@@ -39,6 +39,21 @@ func pageLoadedFromCmd(t *testing.T, cmd tea.Cmd) pageLoadedMsg {
 	return loaded
 }
 
+func updateKeySequence(t *testing.T, m model, keys ...string) (model, tea.Cmd) {
+	t.Helper()
+	current := m
+	var cmd tea.Cmd
+	for idx, key := range keys {
+		next, nextCmd := current.Update(keyMsg(key))
+		current = next.(model)
+		if idx < len(keys)-1 && nextCmd != nil {
+			t.Fatalf("%q returned intermediate cmd %v, want nil", key, nextCmd)
+		}
+		cmd = nextCmd
+	}
+	return current, cmd
+}
+
 func syntheticBTreeListModel(count int) model {
 	items := make([]navItem, 0, count+1)
 	for idx := 0; idx < count; idx++ {
@@ -866,6 +881,219 @@ func TestPageListUDHotkeysRespectFilteredPages(t *testing.T) {
 	}
 	if up.active.kind != navPage || up.active.pageNumber != firstFilteredPage {
 		t.Fatalf("u active = %+v, want first filtered page %d", up.active, firstFilteredPage)
+	}
+}
+
+func TestBTreeListNumericPrefixMovementActivatesVisibleRows(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(30)
+
+	got, cmd := updateKeySequence(t, m, "2", "5", "j")
+	if cmd != nil {
+		t.Fatalf("25j on b-tree list returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != 25 {
+		t.Fatalf("25j selected index %d, want 25", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:25" {
+		t.Fatalf("25j active = %+v, want table:25", got.active)
+	}
+	if got.numericPrefix != "" {
+		t.Fatalf("25j left numeric prefix %q", got.numericPrefix)
+	}
+
+	got, cmd = updateKeySequence(t, got, "1", "0", "k")
+	if cmd != nil {
+		t.Fatalf("10k on b-tree list returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != 15 {
+		t.Fatalf("10k selected index %d, want 15", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:15" {
+		t.Fatalf("10k active = %+v, want table:15", got.active)
+	}
+}
+
+func TestPageListNumericPrefixMovementActivatesUnfilteredRows(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	firstIndex := m.selectedIndex
+	firstPage := m.selectedItem().pageNumber
+
+	got, cmd := updateKeySequence(t, m, "2", "5", "j")
+	if cmd == nil {
+		t.Fatal("25j on page list did not return page load command")
+	}
+	if got.selectedIndex != firstIndex+25 {
+		t.Fatalf("25j selected index %d, want %d", got.selectedIndex, firstIndex+25)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("25j active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+	if got.numericPrefix != "" {
+		t.Fatalf("25j left numeric prefix %q", got.numericPrefix)
+	}
+
+	got, cmd = updateKeySequence(t, got, "2", "5", "k")
+	if cmd == nil {
+		t.Fatal("25k on page list did not return page load command")
+	}
+	if got.selectedIndex != firstIndex {
+		t.Fatalf("25k selected index %d, want %d", got.selectedIndex, firstIndex)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != firstPage {
+		t.Fatalf("25k active = %+v, want page %d", got.active, firstPage)
+	}
+}
+
+func TestPageListNumericPrefixMovementRespectsFilteredPages(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	companies := objectByName(t, m.db, "companies")
+	m.applyFilter(companies)
+	m.focusedPane = navPane
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no filtered page rows")
+	}
+	firstIndex := m.selectedIndex
+	lastIndex, ok := m.boundaryIndexMatching(func(item navItem) bool { return item.kind == navPage }, false)
+	if !ok {
+		t.Fatal("setup: no filtered page rows")
+	}
+	if lastIndex < firstIndex+2 {
+		t.Fatalf("setup: filtered page list has too few rows: first=%d last=%d", firstIndex, lastIndex)
+	}
+
+	got, cmd := updateKeySequence(t, m, "2", "j")
+	if cmd == nil {
+		t.Fatal("2j on filtered page list did not return page load command")
+	}
+	if got.selectedIndex != firstIndex+2 {
+		t.Fatalf("2j selected filtered index %d, want %d", got.selectedIndex, firstIndex+2)
+	}
+	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
+		t.Fatalf("2j active = %+v, selected item = %+v", got.active, got.selectedItem())
+	}
+}
+
+func TestNumericPrefixMovementClampsAtBoundaries(t *testing.T) {
+	t.Parallel()
+
+	m := syntheticBTreeListModel(12)
+	m.selectedIndex = 10
+
+	got, cmd := updateKeySequence(t, m, "9", "j")
+	if cmd != nil {
+		t.Fatalf("9j near last b-tree returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != 11 {
+		t.Fatalf("9j selected index %d, want clamped last index 11", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:11" {
+		t.Fatalf("9j active = %+v, want table:11", got.active)
+	}
+	if got.numericPrefix != "" {
+		t.Fatalf("9j left numeric prefix %q", got.numericPrefix)
+	}
+
+	got.selectedIndex = 1
+	got.active = contentTarget{kind: navTable, schemaName: "table_01", schemaID: "table:01"}
+	got, cmd = updateKeySequence(t, got, "9", "k")
+	if cmd != nil {
+		t.Fatalf("9k near first b-tree returned cmd %v, want nil", cmd)
+	}
+	if got.selectedIndex != 0 {
+		t.Fatalf("9k selected index %d, want clamped first index 0", got.selectedIndex)
+	}
+	if got.active.kind != navTable || got.active.schemaID != "table:00" {
+		t.Fatalf("9k active = %+v, want table:00", got.active)
+	}
+}
+
+func TestNumericPrefixRejectedBeforeUDAndCleared(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"d", "u"} {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+
+			m := syntheticBTreeListModel(20)
+			active := m.active
+
+			got, cmd := updateKeySequence(t, m, "2", key)
+			if cmd != nil {
+				t.Fatalf("2%s returned cmd %v, want nil", key, cmd)
+			}
+			if got.selectedIndex != m.selectedIndex {
+				t.Fatalf("2%s moved selection from %d to %d", key, m.selectedIndex, got.selectedIndex)
+			}
+			if got.active != active {
+				t.Fatalf("2%s changed active from %+v to %+v", key, active, got.active)
+			}
+			if got.numericPrefix != "" {
+				t.Fatalf("2%s left numeric prefix %q", key, got.numericPrefix)
+			}
+			if !strings.Contains(got.footerLine(), "count not supported for "+key) {
+				t.Fatalf("2%s footer = %q", key, got.footerLine())
+			}
+
+			got, cmd = updateKeySequence(t, got, "j")
+			if cmd != nil {
+				t.Fatalf("j after rejected 2%s returned cmd %v, want nil", key, cmd)
+			}
+			if got.selectedIndex != m.selectedIndex+1 {
+				t.Fatalf("j after rejected 2%s selected index %d, want one-row movement", key, got.selectedIndex)
+			}
+		})
+	}
+}
+
+func TestNumericPrefixClearsOnEscPaneJumpsAndInvalidKeys(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		keys []string
+	}{
+		{name: "esc", keys: []string{"2", "5", "esc"}},
+		{name: "U", keys: []string{"2", "5", "U"}},
+		{name: "I", keys: []string{"2", "5", "I"}},
+		{name: "O", keys: []string{"2", "5", "O"}},
+		{name: "P", keys: []string{"2", "5", "P"}},
+		{name: "invalid", keys: []string{"2", "5", "h"}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := syntheticBTreeListModel(30)
+			m.selectedIndex = 5
+			active := m.active
+
+			got, cmd := updateKeySequence(t, m, tc.keys...)
+			if tc.name != "I" && cmd != nil {
+				t.Fatalf("%v returned cmd %v, want nil", tc.keys, cmd)
+			}
+			if got.numericPrefix != "" {
+				t.Fatalf("%v left numeric prefix %q", tc.keys, got.numericPrefix)
+			}
+			if tc.name == "invalid" && got.selectedIndex != m.selectedIndex {
+				t.Fatalf("invalid key sequence moved selection from %d to %d", m.selectedIndex, got.selectedIndex)
+			}
+			if tc.name == "invalid" && got.active != active {
+				t.Fatalf("invalid key sequence changed active from %+v to %+v", active, got.active)
+			}
+		})
 	}
 }
 

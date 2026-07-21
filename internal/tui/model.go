@@ -96,6 +96,7 @@ type model struct {
 	indexTotal      int
 	activeFilter    *filterSource // nil = unfiltered
 	pendingG        bool
+	numericPrefix   string
 }
 
 func newModel(database storage.Database, overview *storage.DatabaseOverview) (model, error) {
@@ -289,22 +290,48 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if isDigitKey(key) {
+		if m.canUseNumericPrefix() {
+			m.numericPrefix += key
+		}
+		return m, nil
+	}
+
+	if m.numericPrefix != "" && !keyAcceptsNumericPrefix(key) {
+		switch key {
+		case "ctrl+c", "q", "U", "I", "O", "P", "esc":
+			m.clearNumericPrefix()
+		case "d", "u":
+			m.rejectNumericPrefix(key)
+			return m, nil
+		case "g":
+			m.rejectNumericPrefix("gg")
+			return m, nil
+		default:
+			m.clearNumericPrefix()
+			return m, nil
+		}
+	}
+
 	switch key {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "U":
+		m.clearNumericPrefix()
 		m.focusedPane = navPane
 		if m.selectBTreeRowForPaneReturn() {
 			return m.activateSelected()
 		}
 		return m, nil
 	case "I":
+		m.clearNumericPrefix()
 		m.focusedPane = navPane
 		if m.selectPageRowForPaneReturn() {
 			return m.activateSelected()
 		}
 		return m, nil
 	case "O":
+		m.clearNumericPrefix()
 		m.focusedPane = explorerPane
 		if m.active.kind == navPage {
 			m.metaSource = pageMetaFromHex
@@ -313,6 +340,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "P":
+		m.clearNumericPrefix()
 		if m.active.kind == navPage {
 			switch m.focusedPane {
 			case navPane:
@@ -369,6 +397,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "up", "k":
 		if m.focusedPane == navPane {
+			if m.selectedIndexHasBTree() || m.selectedIndexHasKind(navPage) {
+				count := m.consumeNumericPrefix(1)
+				if count > 0 && m.moveSelectionWithinSection(-count) {
+					return m.activateSelected()
+				}
+				return m, nil
+			}
 			if m.moveSelection(-1) {
 				return m.activateSelected()
 			}
@@ -386,6 +421,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "down", "j":
 		if m.focusedPane == navPane {
+			if m.selectedIndexHasBTree() || m.selectedIndexHasKind(navPage) {
+				count := m.consumeNumericPrefix(1)
+				if count > 0 && m.moveSelectionWithinSection(count) {
+					return m.activateSelected()
+				}
+				return m, nil
+			}
 			if m.moveSelection(1) {
 				return m.activateSelected()
 			}
@@ -424,6 +466,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc":
+		m.clearNumericPrefix()
 		if m.isFiltered() {
 			m.clearFilter()
 			return m, nil
@@ -492,6 +535,44 @@ func (m model) boundaryIndexMatching(match func(navItem) bool, first bool) (int,
 		result = idx
 	}
 	return result, found
+}
+
+func isDigitKey(key string) bool {
+	return len(key) == 1 && key[0] >= '0' && key[0] <= '9'
+}
+
+func keyAcceptsNumericPrefix(key string) bool {
+	return key == "j" || key == "k"
+}
+
+func (m model) canUseNumericPrefix() bool {
+	return m.focusedPane == navPane && (m.selectedIndexHasBTree() || m.selectedIndexHasKind(navPage))
+}
+
+func (m *model) clearNumericPrefix() {
+	m.numericPrefix = ""
+}
+
+func (m *model) rejectNumericPrefix(key string) {
+	m.clearNumericPrefix()
+	m.status = fmt.Sprintf("count not supported for %s", key)
+}
+
+func (m *model) consumeNumericPrefix(defaultCount int) int {
+	if m.numericPrefix == "" {
+		return defaultCount
+	}
+	count := 0
+	limit := max(1, len(m.navItems))
+	for _, r := range m.numericPrefix {
+		count = count*10 + int(r-'0')
+		if count > limit {
+			count = limit
+			break
+		}
+	}
+	m.clearNumericPrefix()
+	return count
 }
 
 func (m *model) moveSelection(delta int) bool {
