@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help build run test
+.PHONY: help build run test fixtures-bbolt
 
 BINARY := bin/badger
 MAIN := ./cmd/badger
@@ -16,5 +16,8 @@ build: ## Build the main binary
 run: ## Run the main program (pass ARGS='...')
 	go run $(MAIN) $(ARGS)
 
-test: ## Run all tests
+fixtures-bbolt: ## Generate bbolt fixture databases
+	go run fixtures/bbolt/generate.go
+
+test: fixtures-bbolt ## Run all tests
 	go test -v ./...

@@ -5,22 +5,22 @@ import (
 	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/nikitazigman/badger/internal/sqlite"
+	"github.com/nikitazigman/badger/internal/storage"
 )
 
 func Run(path string, out io.Writer) error {
-	inspector, err := sqlite.Open(path)
+	db, err := storage.Open(path)
 	if err != nil {
 		return err
 	}
-	defer inspector.Close()
+	defer db.Close()
 
-	metadata, err := inspector.InspectDatabaseMetadata()
+	overview, err := db.Overview()
 	if err != nil {
 		return err
 	}
 
-	appModel, err := newModel(inspector, metadata)
+	appModel, err := newModel(db, overview)
 	if err != nil {
 		return err
 	}
@@ -48,9 +48,9 @@ type errMsg struct {
 	err error
 }
 
-func loadPageCmd(inspector *sqlite.Inspector, pageNumber uint32) tea.Cmd {
+func loadPageCmd(db storage.Database, pageNumber uint64) tea.Cmd {
 	return func() tea.Msg {
-		page, err := inspector.InspectPage(pageNumber)
+		page, err := db.InspectPage(storage.PageRef{ID: pageNumber})
 		if err != nil {
 			return errMsg{err: fmt.Errorf("load page %d: %w", pageNumber, err)}
 		}
@@ -59,18 +59,18 @@ func loadPageCmd(inspector *sqlite.Inspector, pageNumber uint32) tea.Cmd {
 }
 
 type pageLoadedMsg struct {
-	page *sqlite.PageInspection
+	page *storage.PageInspection
 }
 
 type btreeIndexedMsg struct {
-	root uint32
-	walk sqlite.PageWalk
-	err  error // hard failure from PagesForRoot (unreadable/invalid root)
+	id    storage.BTreeID
+	pages []storage.PageRef
+	err   error // hard failure from PagesForBTree (unreadable/invalid root)
 }
 
-func indexBTreeCmd(inspector *sqlite.Inspector, root uint32) tea.Cmd {
+func indexBTreeCmd(db storage.Database, id storage.BTreeID) tea.Cmd {
 	return func() tea.Msg {
-		walk, err := inspector.PagesForRoot(root)
-		return btreeIndexedMsg{root: root, walk: walk, err: err}
+		pages, err := db.PagesForBTree(id)
+		return btreeIndexedMsg{id: id, pages: pages, err: err}
 	}
 }
