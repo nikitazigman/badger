@@ -279,21 +279,21 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
-	case "1":
+	case "U":
 		m.focusedPane = navPane
 		m.selectFirstBTreeRow() // first navTable, else first navIndex
 		if item := m.selectedItem(); item.kind == navTable || item.kind == navIndex {
 			return m.activateSelected()
 		}
 		return m, nil
-	case "2":
+	case "I":
 		m.focusedPane = navPane
 		m.selectFirstKind(navPage) // first PAGES row (was `p`)
 		if m.selectedItem().kind == navPage {
 			return m.activateSelected()
 		}
 		return m, nil
-	case "3":
+	case "O":
 		m.focusedPane = explorerPane
 		if m.active.kind == navPage {
 			m.metaSource = pageMetaFromHex
@@ -301,7 +301,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.revealSelectedHexBlock()
 		}
 		return m, nil
-	case "4":
+	case "P":
 		if m.active.kind == navPage {
 			switch m.focusedPane {
 			case navPane:
@@ -1719,13 +1719,13 @@ func styleHexByte(token string, offset int, blocks []pageBlock, selectedMeta sto
 
 func detailFrameTitle(title string) string {
 	if title == "HEX" {
-		return "[3] HEX"
+		return "[O] HEX"
 	}
-	return "[3] DETAIL  " + title
+	return "[O] DETAIL  " + title
 }
 
 func metaFrameTitle(title string) string {
-	return "[4] META  " + title
+	return "[P] META  " + title
 }
 
 var (
@@ -1972,14 +1972,14 @@ func indexCompleteStatus(m model) string {
 	return fmt.Sprintf("indexed %d b-trees (%d failed)", indexed, len(m.indexErrors))
 }
 
-// sectionLabel renders a section header with its jump-key number prefix. Sections without
-// a jump key render bare.
+// sectionLabel renders a section header with its pane-jump key prefix. Sections without a
+// jump key render bare.
 func sectionLabel(section string) string {
-	num := map[string]string{"B-Trees": "1", "Pages": "2"}[section]
-	if num == "" {
+	key := map[string]string{"B-Trees": "U", "Pages": "I"}[section]
+	if key == "" {
 		return strings.ToUpper(section)
 	}
-	return "[" + num + "] " + strings.ToUpper(section)
+	return "[" + key + "] " + strings.ToUpper(section)
 }
 
 func sectionForNavItem(item navItem) string {

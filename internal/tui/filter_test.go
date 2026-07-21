@@ -400,7 +400,7 @@ func TestFilterRenderFooterAndMarkers(t *testing.T) {
 	}
 	m.focusedPane = explorerPane
 	if strings.Contains(m.footerLine(), "f clear/switch") || strings.Contains(m.footerLine(), "f filter") {
-		t.Fatalf("footer shows filter hint outside view 1: %q", m.footerLine())
+		t.Fatalf("footer shows filter hint outside B-TREES: %q", m.footerLine())
 	}
 	// The cursor is on the source row → a single ▶ marker, never '> ▶'.
 	if strings.Contains(view, "> ▶") || strings.Contains(view, "▶ >") {

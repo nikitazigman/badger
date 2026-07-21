@@ -39,7 +39,7 @@ func pageLoadedFromCmd(t *testing.T, cmd tea.Cmd) pageLoadedMsg {
 	return loaded
 }
 
-func TestSectionJumpsAutoActivate(t *testing.T) {
+func TestPaneJumpsAutoActivate(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
@@ -50,43 +50,43 @@ func TestSectionJumpsAutoActivate(t *testing.T) {
 	m.active = contentTarget{kind: navPage}
 	m.focusedPane = inspectorPane
 
-	// 1 → first B-TREES row.
-	next, _ := m.Update(keyMsg("1"))
+	// U -> first B-TREES row.
+	next, _ := m.Update(keyMsg("U"))
 	got := next.(model)
 	if got.focusedPane != navPane {
-		t.Fatalf("1 focused pane = %v, want navPane", got.focusedPane)
+		t.Fatalf("U focused pane = %v, want navPane", got.focusedPane)
 	}
 	if want := got.indexOfFirstBTree(); got.selectedIndex != want {
-		t.Fatalf("1 selected index %d, want first B-TREES row %d", got.selectedIndex, want)
+		t.Fatalf("U selected index %d, want first B-TREES row %d", got.selectedIndex, want)
 	}
 	if got.active.kind != got.selectedItem().kind || got.active.schemaName != got.selectedItem().schema.Name {
-		t.Fatalf("1 active target = %+v, selected item = %+v", got.active, got.selectedItem())
+		t.Fatalf("U active target = %+v, selected item = %+v", got.active, got.selectedItem())
 	}
 
-	// 2 → first PAGES row.
+	// I -> first PAGES row.
 	got.focusedPane = explorerPane
-	next, cmd := got.Update(keyMsg("2"))
+	next, cmd := got.Update(keyMsg("I"))
 	got = next.(model)
 	if got.focusedPane != navPane {
-		t.Fatalf("2 focused pane = %v, want navPane", got.focusedPane)
+		t.Fatalf("I focused pane = %v, want navPane", got.focusedPane)
 	}
 	if want := firstIndexOfKind(got.navItems, navPage); got.selectedIndex != want {
-		t.Fatalf("2 selected index %d, want first navPage row %d", got.selectedIndex, want)
+		t.Fatalf("I selected index %d, want first navPage row %d", got.selectedIndex, want)
 	}
 	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
-		t.Fatalf("2 active target = %+v, selected item = %+v", got.active, got.selectedItem())
+		t.Fatalf("I active target = %+v, selected item = %+v", got.active, got.selectedItem())
 	}
 	if !got.loading {
-		t.Fatal("2 did not start loading the selected page")
+		t.Fatal("I did not start loading the selected page")
 	}
 	if got.loadingVisible {
-		t.Fatal("2 showed loading immediately; loading indicator must be delayed")
+		t.Fatal("I showed loading immediately; loading indicator must be delayed")
 	}
 	if got.status != "" {
-		t.Fatalf("2 status = %q, want no loading status before delay", got.status)
+		t.Fatalf("I status = %q, want no loading status before delay", got.status)
 	}
 	if cmd == nil {
-		t.Fatal("2 on a page row returned nil cmd, want batched load/delay command")
+		t.Fatal("I on a page row returned nil cmd, want batched load/delay command")
 	}
 	msg := pageLoadedFromCmd(t, cmd)
 	next, _ = got.Update(msg)
@@ -127,14 +127,14 @@ func TestJumpBTreesFallsBackToIndex(t *testing.T) {
 	m.db.Tables = nil
 	m.navItems = buildNavItems(m.db, nil, nil)
 
-	next, _ := m.Update(keyMsg("1"))
+	next, _ := m.Update(keyMsg("U"))
 	got := next.(model)
 	if got.navItems[got.selectedIndex].kind != navIndex {
-		t.Fatalf("1 with no tables landed on kind %v, want navIndex", got.navItems[got.selectedIndex].kind)
+		t.Fatalf("U with no tables landed on kind %v, want navIndex", got.navItems[got.selectedIndex].kind)
 	}
 }
 
-func TestSectionJumpsActivateWhenSelectionAlreadyOnTarget(t *testing.T) {
+func TestPaneJumpsActivateWhenSelectionAlreadyOnTarget(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
@@ -143,16 +143,16 @@ func TestSectionJumpsActivateWhenSelectionAlreadyOnTarget(t *testing.T) {
 	m.selectedIndex = m.indexOfFirstBTree()
 	m.active = contentTarget{kind: navPage, pageNumber: 1}
 	m.focusedPane = inspectorPane
-	next, cmd := m.Update(keyMsg("1"))
+	next, cmd := m.Update(keyMsg("U"))
 	got := next.(model)
 	if cmd != nil {
-		t.Fatalf("1 returned cmd %v, want nil for b-tree activation", cmd)
+		t.Fatalf("U returned cmd %v, want nil for b-tree activation", cmd)
 	}
 	if got.focusedPane != navPane {
-		t.Fatalf("1 focused pane = %v, want navPane", got.focusedPane)
+		t.Fatalf("U focused pane = %v, want navPane", got.focusedPane)
 	}
 	if got.active.kind != got.selectedItem().kind || got.active.schemaName != got.selectedItem().schema.Name {
-		t.Fatalf("1 did not activate already-selected b-tree; active=%+v selected=%+v", got.active, got.selectedItem())
+		t.Fatalf("U did not activate already-selected b-tree; active=%+v selected=%+v", got.active, got.selectedItem())
 	}
 
 	m = got
@@ -161,16 +161,46 @@ func TestSectionJumpsActivateWhenSelectionAlreadyOnTarget(t *testing.T) {
 	}
 	m.active = contentTarget{kind: navTable, schemaName: "sqlite_schema"}
 	m.focusedPane = explorerPane
-	next, cmd = m.Update(keyMsg("2"))
+	next, cmd = m.Update(keyMsg("I"))
 	got = next.(model)
 	if cmd == nil {
-		t.Fatal("2 did not return page load command for already-selected page")
+		t.Fatal("I did not return page load command for already-selected page")
 	}
 	if got.focusedPane != navPane {
-		t.Fatalf("2 focused pane = %v, want navPane", got.focusedPane)
+		t.Fatalf("I focused pane = %v, want navPane", got.focusedPane)
 	}
 	if got.active.kind != navPage || got.active.pageNumber != got.selectedItem().pageNumber {
-		t.Fatalf("2 did not activate already-selected page; active=%+v selected=%+v", got.active, got.selectedItem())
+		t.Fatalf("I did not activate already-selected page; active=%+v selected=%+v", got.active, got.selectedItem())
+	}
+}
+
+func TestDigitPaneKeysAreNoOps(t *testing.T) {
+	t.Parallel()
+
+	m, inspector := newFixtureModel(t, "companies.db")
+	m = indexAll(t, m, inspector)
+	if !m.selectFirstKind(navPage) {
+		t.Fatal("setup: no page rows")
+	}
+	m.focusedPane = inspectorPane
+	idx := m.selectedIndex
+	active := m.active
+
+	for _, key := range []string{"1", "2", "3", "4"} {
+		next, cmd := m.Update(keyMsg(key))
+		got := next.(model)
+		if cmd != nil {
+			t.Fatalf("%q returned cmd %v, want nil", key, cmd)
+		}
+		if got.focusedPane != inspectorPane {
+			t.Fatalf("%q changed focusedPane from inspectorPane to %v", key, got.focusedPane)
+		}
+		if got.selectedIndex != idx {
+			t.Fatalf("%q moved selectedIndex from %d to %d", key, idx, got.selectedIndex)
+		}
+		if got.active != active {
+			t.Fatalf("%q changed active from %+v to %+v", key, active, got.active)
+		}
 	}
 }
 
@@ -225,7 +255,7 @@ func TestTabKeysAreNoOps(t *testing.T) {
 	}
 }
 
-func TestNumberedContentPaneJumpsPreserveNavigationState(t *testing.T) {
+func TestContentPaneJumpsPreserveNavigationState(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
@@ -247,8 +277,8 @@ func TestNumberedContentPaneJumpsPreserveNavigationState(t *testing.T) {
 		key  string
 		pane pane
 	}{
-		{key: "3", pane: explorerPane},
-		{key: "4", pane: inspectorPane},
+		{key: "O", pane: explorerPane},
+		{key: "P", pane: inspectorPane},
 	} {
 		m.focusedPane = navPane
 		next, cmd := m.Update(keyMsg(tc.key))
@@ -271,21 +301,21 @@ func TestNumberedContentPaneJumpsPreserveNavigationState(t *testing.T) {
 	}
 }
 
-func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
+func TestPaneLocalControlsWorkAfterPaneJumps(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
 
-	next, cmd = loaded.Update(keyMsg("3"))
+	next, cmd = loaded.Update(keyMsg("O"))
 	detail := next.(model)
 	if cmd != nil {
-		t.Fatal("3 returned a command")
+		t.Fatal("O returned a command")
 	}
 	selectedIndex := detail.selectedIndex
 	next, cmd = detail.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -303,10 +333,10 @@ func TestPaneLocalControlsWorkAfterNumberedJumps(t *testing.T) {
 		t.Fatalf("detail down moved nav selection from %d to %d", selectedIndex, detailMoved.selectedIndex)
 	}
 
-	next, cmd = detailMoved.Update(keyMsg("4"))
+	next, cmd = detailMoved.Update(keyMsg("P"))
 	meta := next.(model)
 	if cmd != nil {
-		t.Fatal("4 returned a command")
+		t.Fatal("P returned a command")
 	}
 	next, cmd = meta.Update(tea.KeyMsg{Type: tea.KeyDown})
 	metaScrolled := next.(model)
@@ -330,7 +360,7 @@ func TestEnterOnlyActivatesNavigationPane(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -484,7 +514,7 @@ func TestLoadingIndicatorAppearsAfterDelayOnly(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	got := next.(model)
 	if cmd == nil {
 		t.Fatal("page activation returned nil cmd")
@@ -527,7 +557,7 @@ func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	firstLoading := next.(model)
 	next, _ = firstLoading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -552,7 +582,7 @@ func TestFastPageScrollKeepsPreviousPageVisibleDuringDelay(t *testing.T) {
 	}
 
 	view := scrolling.View()
-	if !strings.Contains(view, "[3] HEX") {
+	if !strings.Contains(view, "[O] HEX") {
 		t.Fatalf("view did not render the page pane as HEX during delay:\n%s", view)
 	}
 	if !strings.Contains(view, "Offset   00 01 02 03 04 05 06 07") ||
@@ -574,7 +604,7 @@ func TestPageHexPaneAndMeta(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -583,7 +613,7 @@ func TestPageHexPaneAndMeta(t *testing.T) {
 	pagePane := loaded.viewExplorer(80, 8)
 	meta := loaded.viewInspector(60, 20)
 	for _, want := range []string{
-		"[3] HEX",
+		"[O] HEX",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("page view missing %q:\n%s", want, view)
@@ -599,7 +629,7 @@ func TestPageHexPaneAndMeta(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"[4] META",
+		"[P] META",
 		"Page 1",
 		"Type: leaf table",
 		"Page size: 4096 bytes",
@@ -627,7 +657,7 @@ func TestPageViewKeepsFullHexRowsAtDefaultWidth(t *testing.T) {
 	m.width = 120
 	m.height = 34
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -651,7 +681,7 @@ func TestFilteredPageMetaShowsBTreeSource(t *testing.T) {
 	companies := objectByName(t, m.db, "companies")
 	m.applyFilter(companies)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -673,7 +703,7 @@ func TestPageBlocksArePhysicalOrder(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -701,21 +731,21 @@ func TestHexFocusAndMovementSelectTopLevelBlocks(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
 
-	next, cmd = loaded.Update(keyMsg("3"))
+	next, cmd = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 	if cmd != nil {
-		t.Fatal("3 returned a command")
+		t.Fatal("O returned a command")
 	}
 	if hex.focusedPane != explorerPane {
-		t.Fatalf("3 focused pane = %v, want explorerPane", hex.focusedPane)
+		t.Fatalf("O focused pane = %v, want explorerPane", hex.focusedPane)
 	}
 	if !hex.blockSelected || hex.selectedBlock != 0 {
-		t.Fatalf("3 selected block = (%v, %d), want first block", hex.blockSelected, hex.selectedBlock)
+		t.Fatalf("O selected block = (%v, %d), want first block", hex.blockSelected, hex.selectedBlock)
 	}
 	if meta := hex.viewInspector(48, 12); !strings.Contains(meta, "Database Header") || !strings.Contains(meta, "Page size:") {
 		t.Fatalf("hex focus did not switch META to first block:\n%s", meta)
@@ -737,13 +767,13 @@ func TestHexFocusAndMovementSelectTopLevelBlocks(t *testing.T) {
 		t.Fatalf("hex movement did not switch META to page header:\n%s", meta)
 	}
 
-	next, cmd = moved.Update(keyMsg("4"))
+	next, cmd = moved.Update(keyMsg("P"))
 	metaFocused := next.(model)
 	if cmd != nil {
-		t.Fatal("4 returned a command")
+		t.Fatal("P returned a command")
 	}
 	if metaFocused.focusedPane != inspectorPane || metaFocused.selectedBlock != moved.selectedBlock {
-		t.Fatalf("4 changed focus/selection to pane=%v block=%d", metaFocused.focusedPane, metaFocused.selectedBlock)
+		t.Fatalf("P changed focus/selection to pane=%v block=%d", metaFocused.focusedPane, metaFocused.selectedBlock)
 	}
 	next, _ = metaFocused.Update(tea.KeyMsg{Type: tea.KeyDown})
 	scrolled := next.(model)
@@ -761,35 +791,35 @@ func TestMetaToHexPreservesBlockSelection(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 	next, _ = hex.Update(tea.KeyMsg{Type: tea.KeyDown})
 	hex = next.(model)
 	selectedBlock := hex.selectedBlock
 
-	next, cmd = hex.Update(keyMsg("4"))
+	next, cmd = hex.Update(keyMsg("P"))
 	meta := next.(model)
 	if cmd != nil {
-		t.Fatal("4 returned a command")
+		t.Fatal("P returned a command")
 	}
 	if meta.focusedPane != inspectorPane {
-		t.Fatalf("4 focused pane = %v, want inspectorPane", meta.focusedPane)
+		t.Fatalf("P focused pane = %v, want inspectorPane", meta.focusedPane)
 	}
 
-	next, cmd = meta.Update(keyMsg("3"))
+	next, cmd = meta.Update(keyMsg("O"))
 	back := next.(model)
 	if cmd != nil {
-		t.Fatal("3 from META returned a command")
+		t.Fatal("O from META returned a command")
 	}
 	if back.focusedPane != explorerPane {
-		t.Fatalf("3 from META focused pane = %v, want explorerPane", back.focusedPane)
+		t.Fatalf("O from META focused pane = %v, want explorerPane", back.focusedPane)
 	}
 	if !back.blockSelected || back.selectedBlock != selectedBlock {
-		t.Fatalf("3 from META selected block = (%v, %d), want (%v, %d)", back.blockSelected, back.selectedBlock, true, selectedBlock)
+		t.Fatalf("O from META selected block = (%v, %d), want (%v, %d)", back.blockSelected, back.selectedBlock, true, selectedBlock)
 	}
 }
 
@@ -799,11 +829,11 @@ func TestMetaToHexPreservesDrillSelection(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 
 	parent := selectFirstDrillableBlock(t, &hex)
@@ -814,30 +844,30 @@ func TestMetaToHexPreservesDrillSelection(t *testing.T) {
 	stackDepth := len(drilled.drill.stack)
 	selectedChild := drilled.drill.stack[stackDepth-1].selectedChild
 
-	next, cmd = drilled.Update(keyMsg("4"))
+	next, cmd = drilled.Update(keyMsg("P"))
 	meta := next.(model)
 	if cmd != nil {
-		t.Fatal("4 returned a command")
+		t.Fatal("P returned a command")
 	}
-	next, cmd = meta.Update(keyMsg("3"))
+	next, cmd = meta.Update(keyMsg("O"))
 	back := next.(model)
 	if cmd != nil {
-		t.Fatal("3 from META returned a command")
+		t.Fatal("O from META returned a command")
 	}
 	if back.focusedPane != explorerPane {
-		t.Fatalf("3 from META focused pane = %v, want explorerPane", back.focusedPane)
+		t.Fatalf("O from META focused pane = %v, want explorerPane", back.focusedPane)
 	}
 	if !back.drill.active || back.drill.parentBlock != parent {
-		t.Fatalf("3 from META changed drill parent/state to %+v, want parent %d active", back.drill, parent)
+		t.Fatalf("O from META changed drill parent/state to %+v, want parent %d active", back.drill, parent)
 	}
 	if len(back.drill.stack) != stackDepth {
-		t.Fatalf("3 from META changed drill depth to %d, want %d", len(back.drill.stack), stackDepth)
+		t.Fatalf("O from META changed drill depth to %d, want %d", len(back.drill.stack), stackDepth)
 	}
 	if got := back.drill.stack[len(back.drill.stack)-1].selectedChild; got != selectedChild {
-		t.Fatalf("3 from META changed selected drill child to %d, want %d", got, selectedChild)
+		t.Fatalf("O from META changed selected drill child to %d, want %d", got, selectedChild)
 	}
 	if back.selectedBlock != parent {
-		t.Fatalf("3 from META selected block %d, want parent %d", back.selectedBlock, parent)
+		t.Fatalf("O from META selected block %d, want parent %d", back.selectedBlock, parent)
 	}
 }
 
@@ -847,24 +877,24 @@ func TestPagesToMetaShowsPageMetadataAfterHexDrillActivity(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 	selectFirstDrillableBlock(t, &hex)
 	next, _ = hex.Update(keyMsg("d"))
 	drilled := next.(model)
 
 	drilled.focusedPane = navPane
-	next, cmd = drilled.Update(keyMsg("4"))
+	next, cmd = drilled.Update(keyMsg("P"))
 	meta := next.(model)
 	if cmd != nil {
-		t.Fatal("4 from PAGES returned a command")
+		t.Fatal("P from PAGES returned a command")
 	}
 	if meta.focusedPane != inspectorPane {
-		t.Fatalf("4 from PAGES focused pane = %v, want inspectorPane", meta.focusedPane)
+		t.Fatalf("P from PAGES focused pane = %v, want inspectorPane", meta.focusedPane)
 	}
 	content := meta.viewInspector(52, 14)
 	for _, want := range []string{"Page 1", "STRUCTURE", "Cells:", "Pointer array:"} {
@@ -873,7 +903,7 @@ func TestPagesToMetaShowsPageMetadataAfterHexDrillActivity(t *testing.T) {
 		}
 	}
 	if strings.Contains(content, "Parent: Cell") || strings.Contains(content, "Payload Size") {
-		t.Fatalf("4 from PAGES showed drill metadata instead of page metadata:\n%s", content)
+		t.Fatalf("P from PAGES showed drill metadata instead of page metadata:\n%s", content)
 	}
 }
 
@@ -883,7 +913,7 @@ func TestCellBlockMetaShowsParsedValues(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
@@ -918,11 +948,11 @@ func TestCellDrillToggleMovementAndMeta(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 
 	parent := selectFirstDrillableBlock(t, &hex)
@@ -1086,11 +1116,11 @@ func TestFooterDrillHintsAreContextual(t *testing.T) {
 		t.Fatalf("footer shows drill hints before a drillable page selection: %q", m.footerLine())
 	}
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 
 	hex.selectedBlock = 0
@@ -1135,30 +1165,30 @@ func TestFooterDrillHintsAreContextual(t *testing.T) {
 	}
 }
 
-func TestFooterFilterHintIsContextualToViewOne(t *testing.T) {
+func TestFooterFilterHintIsContextualToBTrees(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, _ := m.Update(keyMsg("1"))
+	next, _ := m.Update(keyMsg("U"))
 	btrees := next.(model)
 	if !strings.Contains(btrees.footerLine(), "f filter") {
-		t.Fatalf("footer missing filter hint in view 1: %q", btrees.footerLine())
+		t.Fatalf("footer missing filter hint in B-TREES: %q", btrees.footerLine())
 	}
 
-	next, cmd := btrees.Update(keyMsg("2"))
+	next, cmd := btrees.Update(keyMsg("I"))
 	pages := next.(model)
 	if cmd == nil {
-		t.Fatal("2 did not activate a page")
+		t.Fatal("I did not activate a page")
 	}
 	if strings.Contains(pages.footerLine(), "f filter") || strings.Contains(pages.footerLine(), "f clear/switch") {
-		t.Fatalf("footer shows filter hint outside view 1: %q", pages.footerLine())
+		t.Fatalf("footer shows filter hint outside B-TREES: %q", pages.footerLine())
 	}
 
 	next, _ = pages.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 	if strings.Contains(hex.footerLine(), "f filter") || strings.Contains(hex.footerLine(), "f clear/switch") {
 		t.Fatalf("footer shows filter hint in HEX view: %q", hex.footerLine())
@@ -1171,11 +1201,11 @@ func TestDrillNoOpAndPageChangeReset(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 
 	hex.selectedBlock = 0
@@ -1434,12 +1464,12 @@ func TestHexSelectionRenderingAndScrollReveal(t *testing.T) {
 	m = indexAll(t, m, inspector)
 	m.height = 8
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
 
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 	blocks := hex.currentPageBlocks()
 	if len(blocks) < 5 {
@@ -1661,11 +1691,11 @@ func TestPageMovementResetsHexSelection(t *testing.T) {
 	m, inspector := newFixtureModel(t, "companies.db")
 	m = indexAll(t, m, inspector)
 
-	next, cmd := m.Update(keyMsg("2"))
+	next, cmd := m.Update(keyMsg("I"))
 	loading := next.(model)
 	next, _ = loading.Update(pageLoadedFromCmd(t, cmd))
 	loaded := next.(model)
-	next, _ = loaded.Update(keyMsg("3"))
+	next, _ = loaded.Update(keyMsg("O"))
 	hex := next.(model)
 
 	hex.focusedPane = navPane
@@ -1714,12 +1744,12 @@ func TestVisibleJumpLabels(t *testing.T) {
 	m = indexAll(t, m, inspector)
 
 	view := m.View()
-	for _, label := range []string{"[1] B-TREES", "[2] PAGES", "[3] DETAIL", "[4] META"} {
+	for _, label := range []string{"[U] B-TREES", "[I] PAGES", "[O] DETAIL", "[P] META"} {
 		if !strings.Contains(view, label) {
 			t.Fatalf("view missing jump label %q", label)
 		}
 	}
-	for _, removed := range []string{"[1] MAIN", "Overview", "DB Header"} {
+	for _, removed := range []string{"[1] B-TREES", "[2] PAGES", "[3] DETAIL", "[4] META", "[U] MAIN", "Overview", "DB Header"} {
 		if strings.Contains(view, removed) {
 			t.Fatalf("navigation pane still contains removed content %q", removed)
 		}
@@ -1734,7 +1764,7 @@ func TestVisibleJumpLabels(t *testing.T) {
 	if strings.Contains(m.footerLine(), "d drill") || strings.Contains(m.footerLine(), "b back") {
 		t.Fatalf("footer shows drill hints without a drillable selection: %q", m.footerLine())
 	}
-	for _, label := range []string{"[1] b-trees", "[2] pages", "[3] detail", "[4] meta"} {
+	for _, label := range []string{"[U] b-trees", "[I] pages", "[O] detail", "[P] meta"} {
 		if strings.Contains(m.footerLine(), label) {
 			t.Fatalf("footer still explains obvious jump hint %q: %q", label, m.footerLine())
 		}
@@ -1754,14 +1784,14 @@ func TestNavigationSectionsRenderAsSeparateFrames(t *testing.T) {
 	if strings.Count(nav, "┌") != 2 {
 		t.Fatalf("navigation column should render two framed sections:\n%s", nav)
 	}
-	for _, label := range []string{"[1] B-TREES", "[2] PAGES"} {
+	for _, label := range []string{"[U] B-TREES", "[I] PAGES"} {
 		if !strings.Contains(nav, label) {
 			t.Fatalf("navigation column missing section frame title %q:\n%s", label, nav)
 		}
 	}
 }
 
-func TestContentPaneTitlesShowJumpNumbers(t *testing.T) {
+func TestContentPaneTitlesShowJumpKeys(t *testing.T) {
 	t.Parallel()
 
 	m, inspector := newFixtureModel(t, "companies.db")
@@ -1785,7 +1815,7 @@ func TestContentPaneTitlesShowJumpNumbers(t *testing.T) {
 			t.Fatalf("80x24 view row %d width = %d, want <= %d: %q", idx, got, m.width, line)
 		}
 	}
-	for _, label := range []string{"[3] DETAIL", "[4] META", "sqlite_schema"} {
+	for _, label := range []string{"[O] DETAIL", "[P] META", "sqlite_schema"} {
 		if !strings.Contains(fullView, label) {
 			t.Fatalf("80x24 view missing %q:\n%s", label, fullView)
 		}
