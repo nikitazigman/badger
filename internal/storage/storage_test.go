@@ -97,6 +97,120 @@ func TestSQLiteInspectPageAndPagesForBTree(t *testing.T) {
 	}
 }
 
+func TestSQLiteInspectOverflowPage(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "overflow.db")
+	if err := os.WriteFile(dbPath, buildStorageOverflowDB(), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	page, err := db.InspectPage(PageRef{ID: 2})
+	if err != nil {
+		t.Fatalf("InspectPage(2) returned error: %v", err)
+	}
+	if len(page.Raw) != 4096 {
+		t.Fatalf("raw page bytes = %d, want 4096", len(page.Raw))
+	}
+	if testFieldValue(page.Rows, "Type") != "overflow" {
+		t.Fatalf("Type row = %q, want overflow", testFieldValue(page.Rows, "Type"))
+	}
+	if testFieldValue(page.Rows, "Next overflow page") != "0 (end of chain)" {
+		t.Fatalf("Next overflow page row = %q, want chain terminator", testFieldValue(page.Rows, "Next overflow page"))
+	}
+	if testFieldValue(page.Rows, "Parent page") != "1" {
+		t.Fatalf("Parent page row = %q, want 1", testFieldValue(page.Rows, "Parent page"))
+	}
+	if testFieldValue(page.Rows, "Overflow part") != "1 of 1" {
+		t.Fatalf("Overflow part row = %q, want 1 of 1", testFieldValue(page.Rows, "Overflow part"))
+	}
+	next := testHexBlockByKind(page.HexBlocks, blockOverflowNextPage)
+	if next == nil {
+		t.Fatal("overflow page missing next-page hex block")
+	}
+	assertByteSpan(t, next.Span, 0, 4)
+	payload := testHexBlockByKind(page.HexBlocks, blockOverflowPayload)
+	if payload == nil {
+		t.Fatal("overflow page missing payload hex block")
+	}
+	assertByteSpan(t, payload.Span, 4, 4092)
+}
+
+func TestSQLiteLocalK8sEtcdOverflowFixture(t *testing.T) {
+	t.Parallel()
+
+	path := fixturePath("local-k8s-etcd.db")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("local-k8s-etcd.db fixture is not present")
+		}
+		t.Fatalf("stat fixture: %v", err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	page10, err := db.InspectPage(PageRef{ID: 10})
+	if err != nil {
+		t.Fatalf("InspectPage(10) returned error: %v", err)
+	}
+	if testFieldValue(page10.Rows, "Type") != "overflow" {
+		t.Fatalf("page 10 Type row = %q, want overflow", testFieldValue(page10.Rows, "Type"))
+	}
+	if testFieldValue(page10.Rows, "Next overflow page") != "11" {
+		t.Fatalf("page 10 next overflow row = %q, want 11", testFieldValue(page10.Rows, "Next overflow page"))
+	}
+
+	page11, err := db.InspectPage(PageRef{ID: 11})
+	if err != nil {
+		t.Fatalf("InspectPage(11) returned error: %v", err)
+	}
+	if testFieldValue(page11.Rows, "Type") != "overflow" {
+		t.Fatalf("page 11 Type row = %q, want overflow", testFieldValue(page11.Rows, "Type"))
+	}
+	if testFieldValue(page11.Rows, "Next overflow page") != "0 (end of chain)" {
+		t.Fatalf("page 11 next overflow row = %q, want chain terminator", testFieldValue(page11.Rows, "Next overflow page"))
+	}
+	if testFieldValue(page10.Rows, "Parent page") == "" {
+		t.Fatal("page 10 missing Parent page owner row")
+	}
+	if testFieldValue(page11.Rows, "Parent page") != testFieldValue(page10.Rows, "Parent page") {
+		t.Fatalf("page 11 Parent page = %q, want same parent as page 10 %q", testFieldValue(page11.Rows, "Parent page"), testFieldValue(page10.Rows, "Parent page"))
+	}
+	if testFieldValue(page10.Rows, "Overflow part") != "1 of 2" {
+		t.Fatalf("page 10 overflow part = %q, want 1 of 2", testFieldValue(page10.Rows, "Overflow part"))
+	}
+	if testFieldValue(page11.Rows, "Overflow part") != "2 of 2" {
+		t.Fatalf("page 11 overflow part = %q, want 2 of 2", testFieldValue(page11.Rows, "Overflow part"))
+	}
+	overview, err := db.Overview()
+	if err != nil {
+		t.Fatalf("Overview returned error: %v", err)
+	}
+	for _, item := range overview.BTrees {
+		if item.RootPage == nil {
+			continue
+		}
+		pages, err := db.PagesForBTree(item.ID)
+		if err != nil {
+			t.Fatalf("PagesForBTree(%s) returned error: %v", item.ID, err)
+		}
+		if pageRefsContain(pages, 10) && pageRefsContain(pages, 11) {
+			return
+		}
+	}
+	t.Fatal("no filtered SQLite b-tree included overflow pages 10 and 11")
+}
+
 func TestOpenBboltOverview(t *testing.T) {
 	t.Parallel()
 
@@ -731,6 +845,15 @@ func testFieldValue(rows []Field, label string) string {
 	return ""
 }
 
+func pageRefsContain(refs []PageRef, id uint64) bool {
+	for _, ref := range refs {
+		if ref.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func testHexBlockByKind(blocks []HexBlock, kind string) *HexBlock {
 	for idx := range blocks {
 		if blocks[idx].Kind == kind {
@@ -932,6 +1055,41 @@ func assertPageSummary(t *testing.T, summaries []PageSummary, id uint64, classif
 		return
 	}
 	t.Fatalf("page summary %d not found", id)
+}
+
+func buildStorageOverflowDB() []byte {
+	const pageSize = 4096
+	buf := make([]byte, pageSize*2)
+
+	copy(buf[0:16], []byte("SQLite format 3\x00"))
+	binary.BigEndian.PutUint16(buf[16:18], uint16(pageSize))
+	buf[18] = 1
+	buf[19] = 1
+	buf[21] = 64
+	buf[22] = 32
+	buf[23] = 32
+	binary.BigEndian.PutUint32(buf[28:32], 2)
+	binary.BigEndian.PutUint32(buf[44:48], 4)
+	binary.BigEndian.PutUint32(buf[56:60], 1)
+	binary.BigEndian.PutUint32(buf[92:96], 1)
+	binary.BigEndian.PutUint32(buf[96:100], 3034000)
+
+	headerOffset := 100
+	buf[headerOffset] = 0x0d
+	binary.BigEndian.PutUint16(buf[headerOffset+3:headerOffset+5], 1)
+	binary.BigEndian.PutUint16(buf[headerOffset+5:headerOffset+7], 3500)
+	binary.BigEndian.PutUint16(buf[headerOffset+8:headerOffset+10], 3500)
+
+	cellOffset := 3500
+	cell := make([]byte, 0, 500)
+	cell = append(cell, 0x9f, 0x5e) // varint 4062
+	cell = append(cell, 0x01)       // rowid 1
+	cell = append(cell, make([]byte, 489)...)
+	cell = append(cell, 0x00, 0x00, 0x00, 0x02)
+	copy(buf[cellOffset:cellOffset+len(cell)], cell)
+
+	copy(buf[pageSize+4:], []byte("overflow payload bytes"))
+	return buf
 }
 
 func writeSyntheticBboltFreelistDB(t *testing.T) string {

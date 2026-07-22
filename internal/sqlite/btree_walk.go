@@ -1,6 +1,9 @@
 package sqlite
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // PageWalk is the result of walking one b-tree from its root.
 // Serializable by design (plain integers) so it can later be persisted to disk.
@@ -17,18 +20,19 @@ type SkippedPage struct {
 	Reason string // human-readable parse error
 }
 
-// PagesForRoot walks the b-tree rooted at `root` and returns every page in it
-// (interior + leaf nodes reachable from the root).
+// PagesForRoot walks the b-tree rooted at `root` and returns every physical page in it
+// (interior + leaf nodes reachable from the root, plus record overflow chains).
 //
 //   - Per-child parse failures are recorded in PageWalk.Skipped and the walk continues
 //     (degrade, don't crash).
 //   - An error is returned ONLY for a hard failure: an invalid root, or the root page
 //     itself being unreadable.
 //   - root == 0 (e.g. virtual tables with no b-tree) returns an empty PageWalk and no error.
-//
-// Overflow-page chains are intentionally not followed; an index is its own b-tree
-// and must be walked from its own root.
 func (i *Inspector) PagesForRoot(root uint32) (PageWalk, error) {
+	return i.pagesForRoot(root, true)
+}
+
+func (i *Inspector) pagesForRoot(root uint32, includeOverflow bool) (PageWalk, error) {
 	walk := PageWalk{Root: root}
 	if root == 0 {
 		return walk, nil
@@ -40,9 +44,15 @@ func (i *Inspector) PagesForRoot(root uint32) (PageWalk, error) {
 	if err != nil {
 		return walk, err
 	}
+	if inspection.Format != PageFormatBTree {
+		return walk, fmt.Errorf("root page %d is not a b-tree page", root)
+	}
 
 	visited := map[uint32]bool{root: true}
 	i.walkBTree(inspection, &walk, visited)
+	if includeOverflow {
+		i.appendOverflowPagesForWalk(&walk, visited)
+	}
 
 	sort.Slice(walk.Pages, func(a, b int) bool { return walk.Pages[a] < walk.Pages[b] })
 	return walk, nil
@@ -86,6 +96,36 @@ func (i *Inspector) walkBTree(inspection *PageInspection, walk *PageWalk, visite
 			})
 			continue
 		}
+		if childInspection.Format != PageFormatBTree {
+			walk.Skipped = append(walk.Skipped, SkippedPage{
+				Page:   child,
+				Parent: parent,
+				Reason: "page is not a b-tree page",
+			})
+			continue
+		}
 		i.walkBTree(childInspection, walk, visited)
+	}
+}
+
+func (i *Inspector) appendOverflowPagesForWalk(walk *PageWalk, visited map[uint32]bool) {
+	if walk == nil {
+		return
+	}
+	btreePages := append([]uint32(nil), walk.Pages...)
+	for _, pageNumber := range btreePages {
+		inspection, err := i.InspectPage(pageNumber)
+		if err != nil || inspection.Format != PageFormatBTree {
+			continue
+		}
+		index := &overflowIndex{pages: map[uint32]OverflowPageOwner{}}
+		i.collectPageOverflowChains(index, inspection)
+		for overflowPage := range index.pages {
+			if overflowPage == 0 || visited[overflowPage] {
+				continue
+			}
+			visited[overflowPage] = true
+			walk.Pages = append(walk.Pages, overflowPage)
+		}
 	}
 }

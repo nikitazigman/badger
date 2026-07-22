@@ -20,6 +20,11 @@ const (
 	blockTableInteriorCell = "table_interior_cell"
 	blockIndexLeafCell     = "index_leaf_cell"
 	blockIndexInteriorCell = "index_interior_cell"
+	blockOverflowNextPage  = "overflow_next_page"
+	blockOverflowPayload   = "overflow_payload"
+	blockFreelistHeader    = "freelist_header"
+	blockFreelistLeafPage  = "freelist_leaf_page"
+	blockRawPage           = "raw_page"
 
 	blockPayloadSize      = "payload_size"
 	blockRowID            = "rowid"
@@ -193,6 +198,17 @@ func sqliteHeaderRows(header sqlite.DBHeader) []Field {
 }
 
 func adaptSQLitePage(page *sqlite.PageInspection) *PageInspection {
+	switch page.Format {
+	case sqlite.PageFormatOverflow:
+		return adaptSQLiteOverflowPage(page)
+	case sqlite.PageFormatFreelistTrunk:
+		return adaptSQLiteFreelistTrunkPage(page)
+	case sqlite.PageFormatFreelistLeaf:
+		return adaptSQLiteFreelistLeafPage(page)
+	case sqlite.PageFormatUnknown:
+		return adaptSQLiteUnknownPage(page)
+	}
+
 	header := page.BTreePage.PageHeader
 	pointerBytes := len(page.BTreePage.CellPointerArray.Pointers) * 2
 	unallocatedBytes := 0
@@ -218,9 +234,125 @@ func adaptSQLitePage(page *sqlite.PageInspection) *PageInspection {
 
 	return &PageInspection{
 		Ref:       PageRef{ID: uint64(page.PageNumber)},
-		Raw:       append([]byte(nil), page.BTreePage.Raw...),
+		Raw:       append([]byte(nil), page.Raw...),
 		Rows:      rows,
 		HexBlocks: sqlitePageBlocks(page),
+	}
+}
+
+func adaptSQLiteOverflowPage(page *sqlite.PageInspection) *PageInspection {
+	overflow := page.OverflowPage
+	if overflow == nil {
+		return adaptSQLiteUnknownPage(page)
+	}
+
+	next := strconv.FormatUint(uint64(overflow.NextPage.Value), 10)
+	if overflow.NextPage.Value == 0 {
+		next = "0 (end of chain)"
+	}
+
+	rows := []Field{
+		{Label: "Page", Value: strconv.FormatUint(uint64(page.PageNumber), 10)},
+		{Label: "Type", Value: "overflow"},
+		{Label: "Page size", Value: fmt.Sprintf("%d bytes", len(page.Raw))},
+		{Label: "Usable bytes", Value: strconv.FormatUint(uint64(overflow.UsablePageBytes), 10)},
+		{Label: "File offset", Value: strconv.FormatUint(uint64(page.PageNumber-1)*uint64(len(page.Raw)), 10)},
+		Blank(),
+		Section("STRUCTURE"),
+		{Label: "Next overflow page", Value: next, Span: spanPtr(overflow.NextPage.Meta)},
+		{Label: "Payload", Value: fmt.Sprintf("%d bytes", overflow.Payload.Size), Span: spanPtr(overflow.Payload)},
+	}
+	if page.OverflowOwner != nil {
+		rows = append(rows,
+			Blank(),
+			Section("OWNER"),
+			Field{Label: "Parent page", Value: strconv.FormatUint(uint64(page.OverflowOwner.ParentPage), 10)},
+			Field{Label: "Owner cell", Value: fmt.Sprintf("%s %d", page.OverflowOwner.CellKind, page.OverflowOwner.CellIndex)},
+			Field{Label: "First overflow page", Value: strconv.FormatUint(uint64(page.OverflowOwner.FirstPage), 10)},
+			Field{Label: "Overflow part", Value: fmt.Sprintf("%d of %d", page.OverflowOwner.PartIndex, page.OverflowOwner.PartCount)},
+		)
+	}
+
+	return &PageInspection{
+		Ref:       PageRef{ID: uint64(page.PageNumber)},
+		Raw:       append([]byte(nil), page.Raw...),
+		Rows:      rows,
+		HexBlocks: sqliteOverflowPageBlocks(page),
+	}
+}
+
+func adaptSQLiteFreelistTrunkPage(page *sqlite.PageInspection) *PageInspection {
+	trunk := page.FreelistTrunkPage
+	if trunk == nil {
+		return adaptSQLiteUnknownPage(page)
+	}
+
+	next := strconv.FormatUint(uint64(trunk.NextTrunkPage.Value), 10)
+	if trunk.NextTrunkPage.Value == 0 {
+		next = "0 (end of chain)"
+	}
+
+	rows := []Field{
+		{Label: "Page", Value: strconv.FormatUint(uint64(page.PageNumber), 10)},
+		{Label: "Type", Value: "freelist trunk"},
+		{Label: "Page size", Value: fmt.Sprintf("%d bytes", len(page.Raw))},
+		{Label: "Usable bytes", Value: strconv.FormatUint(uint64(trunk.UsablePageBytes), 10)},
+		{Label: "File offset", Value: strconv.FormatUint(uint64(page.PageNumber-1)*uint64(len(page.Raw)), 10)},
+		Blank(),
+		Section("STRUCTURE"),
+		{Label: "Next trunk page", Value: next, Span: spanPtr(trunk.NextTrunkPage.Meta)},
+		{Label: "Freelist leaf pages", Value: strconv.Itoa(len(trunk.LeafPages)), Span: spanPtr(trunk.LeafPageCount.Meta)},
+	}
+
+	return &PageInspection{
+		Ref:       PageRef{ID: uint64(page.PageNumber)},
+		Raw:       append([]byte(nil), page.Raw...),
+		Rows:      rows,
+		HexBlocks: sqliteFreelistTrunkPageBlocks(page),
+	}
+}
+
+func adaptSQLiteFreelistLeafPage(page *sqlite.PageInspection) *PageInspection {
+	leaf := page.FreelistLeafPage
+	if leaf == nil {
+		return adaptSQLiteUnknownPage(page)
+	}
+
+	rows := []Field{
+		{Label: "Page", Value: strconv.FormatUint(uint64(page.PageNumber), 10)},
+		{Label: "Type", Value: "freelist leaf"},
+		{Label: "Page size", Value: fmt.Sprintf("%d bytes", len(page.Raw))},
+		{Label: "Usable bytes", Value: strconv.FormatUint(uint64(leaf.UsablePageBytes), 10)},
+		{Label: "File offset", Value: strconv.FormatUint(uint64(page.PageNumber-1)*uint64(len(page.Raw)), 10)},
+		Blank(),
+		Section("STRUCTURE"),
+		{Label: "Reusable page", Value: "yes"},
+	}
+
+	return &PageInspection{
+		Ref:       PageRef{ID: uint64(page.PageNumber)},
+		Raw:       append([]byte(nil), page.Raw...),
+		Rows:      rows,
+		HexBlocks: sqliteFreelistLeafPageBlocks(page),
+	}
+}
+
+func adaptSQLiteUnknownPage(page *sqlite.PageInspection) *PageInspection {
+	rows := []Field{
+		{Label: "Page", Value: strconv.FormatUint(uint64(page.PageNumber), 10)},
+		{Label: "Type", Value: "unknown"},
+		{Label: "Page size", Value: fmt.Sprintf("%d bytes", len(page.Raw))},
+		{Label: "File offset", Value: strconv.FormatUint(uint64(page.PageNumber-1)*uint64(len(page.Raw)), 10)},
+		Blank(),
+		Section("STRUCTURE"),
+		{Label: "Parsed structure", Value: "none"},
+	}
+
+	return &PageInspection{
+		Ref:       PageRef{ID: uint64(page.PageNumber)},
+		Raw:       append([]byte(nil), page.Raw...),
+		Rows:      rows,
+		HexBlocks: sqliteUnknownPageBlocks(page),
 	}
 }
 
@@ -281,6 +413,122 @@ func sqlitePageBlocks(page *sqlite.PageInspection) []HexBlock {
 		return blocks[i].Span.Start < blocks[j].Span.Start
 	})
 	return blocks
+}
+
+func sqliteOverflowPageBlocks(page *sqlite.PageInspection) []HexBlock {
+	if page == nil || page.OverflowPage == nil {
+		return nil
+	}
+	overflow := page.OverflowPage
+	blocks := []HexBlock{}
+	blocks = appendBlock(blocks, blockOverflowNextPage, "Next Overflow Page", overflow.NextPage.Meta, []Field{
+		{Label: "Next Overflow Page", Value: ""},
+		{Label: "Offset", Value: offsetRange(overflow.NextPage.Meta)},
+		{Label: "Size", Value: "4 bytes"},
+		Blank(),
+		Section("FIELDS"),
+		{Label: "Page number", Value: overflowNextPageLabel(overflow.NextPage.Value), Span: spanPtr(overflow.NextPage.Meta)},
+		{Label: "Meaning", Value: "next page in this overflow chain"},
+	}, nil)
+	blocks = appendBlock(blocks, blockOverflowPayload, "Overflow Payload", overflow.Payload, []Field{
+		{Label: "Overflow Payload", Value: ""},
+		{Label: "Offset", Value: offsetRange(overflow.Payload)},
+		{Label: "Size", Value: fmt.Sprintf("%d bytes", overflow.Payload.Size)},
+		Blank(),
+		Section("FIELDS"),
+		{Label: "Parsed structure", Value: "none"},
+		{Label: "Role", Value: "record payload continuation bytes"},
+	}, nil)
+	return blocks
+}
+
+func sqliteFreelistTrunkPageBlocks(page *sqlite.PageInspection) []HexBlock {
+	if page == nil || page.FreelistTrunkPage == nil {
+		return nil
+	}
+	trunk := page.FreelistTrunkPage
+	headerMeta := sqlite.Meta{StartOffset: 0, Size: 8}
+	blocks := []HexBlock{}
+	blocks = appendBlock(blocks, blockFreelistHeader, "Freelist Trunk Header", headerMeta, []Field{
+		{Label: "Freelist Trunk Header", Value: ""},
+		{Label: "Offset", Value: offsetRange(headerMeta)},
+		{Label: "Size", Value: "8 bytes"},
+		Blank(),
+		Section("FIELDS"),
+		{Label: "Next trunk page", Value: overflowNextPageLabel(trunk.NextTrunkPage.Value), Span: spanPtr(trunk.NextTrunkPage.Meta)},
+		{Label: "Leaf page count", Value: strconv.Itoa(len(trunk.LeafPages)), Span: spanPtr(trunk.LeafPageCount.Meta)},
+	}, nil)
+	if trunk.Payload.Size > 0 {
+		blocks = appendBlock(blocks, blockFreelistPayload, "Freelist Leaf Page Entries", trunk.Payload, freelistPayloadRows(trunk), nil)
+	}
+	return blocks
+}
+
+func sqliteFreelistLeafPageBlocks(page *sqlite.PageInspection) []HexBlock {
+	if page == nil || page.FreelistLeafPage == nil {
+		return nil
+	}
+	leaf := page.FreelistLeafPage
+	return []HexBlock{{
+		ID:    blockFreelistLeafPage,
+		Kind:  blockFreelistLeafPage,
+		Title: "Freelist Leaf Page",
+		Span:  spanFromMeta(leaf.Payload),
+		Rows: []Field{
+			{Label: "Freelist Leaf Page", Value: ""},
+			{Label: "Offset", Value: offsetRange(leaf.Payload)},
+			{Label: "Size", Value: fmt.Sprintf("%d bytes", leaf.Payload.Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Parsed structure", Value: "none"},
+			{Label: "Reusable", Value: "yes"},
+		},
+	}}
+}
+
+func sqliteUnknownPageBlocks(page *sqlite.PageInspection) []HexBlock {
+	if page == nil || page.UnknownPage == nil {
+		return nil
+	}
+	unknown := page.UnknownPage
+	return []HexBlock{{
+		ID:    blockRawPage,
+		Kind:  blockRawPage,
+		Title: "Raw Page",
+		Span:  spanFromMeta(unknown.Payload),
+		Rows: []Field{
+			{Label: "Raw Page", Value: ""},
+			{Label: "Offset", Value: offsetRange(unknown.Payload)},
+			{Label: "Size", Value: fmt.Sprintf("%d bytes", unknown.Payload.Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Parsed structure", Value: "none"},
+		},
+	}}
+}
+
+func freelistPayloadRows(trunk *sqlite.FreelistTrunkPage) []Field {
+	rows := []Field{
+		{Label: "Freelist Leaf Page Entries", Value: ""},
+		{Label: "Offset", Value: offsetRange(trunk.Payload)},
+		{Label: "Size", Value: fmt.Sprintf("%d bytes", trunk.Payload.Size)},
+		Blank(),
+		Section("FIELDS"),
+		{Label: "Entries", Value: strconv.Itoa(len(trunk.LeafPages))},
+		{Label: "Entry size", Value: "4 bytes"},
+	}
+	if len(trunk.LeafPages) == 0 {
+		return rows
+	}
+	rows = append(rows, Blank(), Section("PAGES"))
+	for idx, leaf := range trunk.LeafPages {
+		rows = append(rows, Field{
+			Label: fmt.Sprintf("%02d", idx),
+			Value: "page " + strconv.FormatUint(uint64(leaf.Value), 10),
+			Span:  spanPtr(leaf.Meta),
+		})
+	}
+	return rows
 }
 
 type hexBlocks []HexBlock
@@ -631,6 +879,13 @@ func sqlitePageKindLabel(kind sqlite.PageKindType) string {
 	default:
 		return fmt.Sprintf("0x%02x", kind)
 	}
+}
+
+func overflowNextPageLabel(value uint32) string {
+	if value == 0 {
+		return "0 (end of chain)"
+	}
+	return strconv.FormatUint(uint64(value), 10)
 }
 
 func textEncodingLabel(value uint32) string {

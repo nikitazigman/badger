@@ -14,6 +14,14 @@ const (
 	LeafTableBTreePage     PageKindType = 0x0d
 )
 
+type UnsupportedPageKindError struct {
+	Kind PageKindType
+}
+
+func (e *UnsupportedPageKindError) Error() string {
+	return fmt.Sprintf("page has unsupported b-tree page kind 0x%02x", e.Kind)
+}
+
 type PageHeader struct {
 	Meta                  Meta
 	PageKind              PageKindField
@@ -51,7 +59,7 @@ func parsePageHeader(header []byte, pageNumber uint32, pageSize uint32, headerOf
 	switch pageHeader.PageKind.Value {
 	case InteriorIndexBTreePage, InteriorTableBTreePage, LeafIndexBTreePage, LeafTableBTreePage:
 	default:
-		return nil, fmt.Errorf("page has unsupported b-tree page kind 0x%02x", pageHeader.PageKind.Value)
+		return nil, &UnsupportedPageKindError{Kind: pageHeader.PageKind.Value}
 	}
 
 	pageHeader.FirstFreeblock = Uint16Field{

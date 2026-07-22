@@ -34,6 +34,7 @@ const (
 	PageClassMeta         PageClassification = "meta"
 	PageClassBranch       PageClassification = "branch"
 	PageClassLeaf         PageClassification = "leaf"
+	PageClassOverflow     PageClassification = "overflow"
 	PageClassFreelist     PageClassification = "freelist"
 	PageClassFree         PageClassification = "free"
 	PageClassContinuation PageClassification = "continuation"

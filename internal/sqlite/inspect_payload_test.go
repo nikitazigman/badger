@@ -144,6 +144,76 @@ func TestInspectPageMarksOverflowCell(t *testing.T) {
 	}
 }
 
+func TestInspectOverflowPage(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "overflow.db")
+	if err := os.WriteFile(dbPath, buildSinglePageOverflowDB(), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	inspector, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer inspector.Close()
+
+	inspection, err := inspector.InspectPage(2)
+	if err != nil {
+		t.Fatalf("InspectPage(2) returned error: %v", err)
+	}
+	if inspection.Format != PageFormatOverflow {
+		t.Fatalf("Format = %q, want %q", inspection.Format, PageFormatOverflow)
+	}
+	if inspection.OverflowPage == nil {
+		t.Fatal("OverflowPage = nil, want non-nil")
+	}
+	if inspection.OverflowPage.NextPage.Value != 0 {
+		t.Fatalf("NextPage = %d, want 0", inspection.OverflowPage.NextPage.Value)
+	}
+	if inspection.OverflowPage.Payload.StartOffset != 4 || inspection.OverflowPage.Payload.Size != 4092 {
+		t.Fatalf("Payload meta = %+v, want offset 4 size 4092", inspection.OverflowPage.Payload)
+	}
+	if inspection.OverflowOwner == nil {
+		t.Fatal("OverflowOwner = nil, want parent metadata")
+	}
+	if inspection.OverflowOwner.ParentPage != 1 {
+		t.Fatalf("ParentPage = %d, want 1", inspection.OverflowOwner.ParentPage)
+	}
+	if inspection.OverflowOwner.PartIndex != 1 || inspection.OverflowOwner.PartCount != 1 {
+		t.Fatalf("overflow part = %d of %d, want 1 of 1", inspection.OverflowOwner.PartIndex, inspection.OverflowOwner.PartCount)
+	}
+}
+
+func TestPagesForRootIncludesOverflowPages(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "overflow.db")
+	if err := os.WriteFile(dbPath, buildSinglePageOverflowDB(), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	inspector, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer inspector.Close()
+
+	walk, err := inspector.PagesForRoot(1)
+	if err != nil {
+		t.Fatalf("PagesForRoot(1) returned error: %v", err)
+	}
+	want := []uint32{1, 2}
+	if len(walk.Pages) != len(want) {
+		t.Fatalf("PagesForRoot(1) = %v, want %v", walk.Pages, want)
+	}
+	for idx := range want {
+		if walk.Pages[idx] != want[idx] {
+			t.Fatalf("PagesForRoot(1) = %v, want %v", walk.Pages, want)
+		}
+	}
+}
+
 func TestInspectDatabaseMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -167,7 +237,7 @@ func TestInspectDatabaseMetadata(t *testing.T) {
 
 func buildSinglePageOverflowDB() []byte {
 	const pageSize = 4096
-	buf := make([]byte, pageSize)
+	buf := make([]byte, pageSize*2)
 
 	copy(buf[0:16], []byte("SQLite format 3\x00"))
 	binary.BigEndian.PutUint16(buf[16:18], uint16(pageSize))
@@ -177,7 +247,7 @@ func buildSinglePageOverflowDB() []byte {
 	buf[21] = 64
 	buf[22] = 32
 	buf[23] = 32
-	binary.BigEndian.PutUint32(buf[28:32], 1)
+	binary.BigEndian.PutUint32(buf[28:32], 2)
 	binary.BigEndian.PutUint32(buf[44:48], 4)
 	binary.BigEndian.PutUint32(buf[56:60], 1)
 	binary.BigEndian.PutUint32(buf[92:96], 1)
@@ -196,6 +266,8 @@ func buildSinglePageOverflowDB() []byte {
 	cell = append(cell, make([]byte, 489)...)
 	cell = append(cell, 0x00, 0x00, 0x00, 0x02)
 	copy(buf[cellOffset:cellOffset+len(cell)], cell)
+
+	copy(buf[pageSize+4:], []byte("overflow payload bytes"))
 
 	return buf
 }
