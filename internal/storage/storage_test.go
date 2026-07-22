@@ -650,30 +650,34 @@ func TestBboltBranchPageInspectionExposesBranchRowsAndBlocks(t *testing.T) {
 func TestBboltInlineBucketLeafEntryExposesEmbeddedPageSpans(t *testing.T) {
 	t.Parallel()
 
-	page, entry := findBboltLeafEntryWithValueChild(t, filepath.Join("bbolt", "nested_inline.db"), blockPageHeader)
+	page, entry := findBboltLeafEntryWithValueChild(t, filepath.Join("bbolt", "nested_inline.db"), blockInlinePageHeader)
 	value := testHexBlockByKind(entry.Children, blockLeafValue)
 	if value == nil {
 		t.Fatal("inline bucket leaf entry missing value block")
 	}
 	if testHexBlockByKind(entry.Children, blockBucketRootPage) != nil ||
 		testHexBlockByKind(entry.Children, blockBucketSequence) != nil ||
-		testHexBlockByKind(entry.Children, blockPageHeader) != nil {
+		testHexBlockByKind(entry.Children, blockInlinePageHeader) != nil {
 		t.Fatal("inline bucket internals are exposed as leaf-entry drill siblings; want them under value")
 	}
-	assertHexFieldChild(t, value.Children, blockBucketRootPage, "Root page", value.Span.Start, 8)
-	assertHexFieldChild(t, value.Children, blockBucketSequence, "Sequence", value.Span.Start+8, 8)
-	assertHexChildOrder(t, value.Children, []string{blockBucketRootPage, blockBucketSequence, blockPageHeader})
-	inlineHeader := testHexBlockByKind(value.Children, blockPageHeader)
+	assertHexFieldChild(t, value.Children, blockInlineBucketRootPage, "Root page", value.Span.Start, 8)
+	assertHexFieldChild(t, value.Children, blockInlineBucketSequence, "Sequence", value.Span.Start+8, 8)
+	assertHexChildOrder(t, value.Children, []string{blockInlineBucketRootPage, blockInlineBucketSequence, blockInlinePageHeader})
+	inlineHeader := testHexBlockByKind(value.Children, blockInlinePageHeader)
 	if inlineHeader == nil {
 		t.Fatal("inline bucket value missing embedded page header child")
 	}
-	descriptors := testHexBlockByKind(value.Children, blockLeafDescriptors)
+	descriptors := testHexBlockByKind(value.Children, blockInlineLeafDescriptors)
 	if descriptors == nil {
 		t.Fatal("inline bucket value missing leaf descriptor child")
 	}
-	inlineEntry := testHexBlockByKind(value.Children, blockLeafEntry)
+	inlineEntry := testHexBlockByKind(value.Children, blockInlineLeafEntry)
 	if inlineEntry == nil {
 		t.Fatal("inline bucket value missing embedded leaf entry child")
+	}
+	if testHexBlockByKind(inlineEntry.Children, blockInlineLeafKey) == nil ||
+		testHexBlockByKind(inlineEntry.Children, blockInlineLeafValue) == nil {
+		t.Fatal("inline bucket embedded leaf entry missing inline key/value child kinds")
 	}
 
 	if inlineHeader.Span.Start != value.Span.Start+16 {
@@ -847,8 +851,13 @@ func assertLeafEntryStorageBlocks(t *testing.T, entry HexBlock, wantBucket bool)
 		if testFieldValue(value.Rows, "Sequence") == "" {
 			t.Fatal("bucket value block missing decoded sequence")
 		}
-		assertHexFieldChild(t, value.Children, blockBucketRootPage, "Root page", value.Span.Start, 8)
-		assertHexFieldChild(t, value.Children, blockBucketSequence, "Sequence", value.Span.Start+8, 8)
+		if testFieldValue(value.Rows, "Format") == "InBucket header + embedded leaf page" {
+			assertHexFieldChild(t, value.Children, blockInlineBucketRootPage, "Root page", value.Span.Start, 8)
+			assertHexFieldChild(t, value.Children, blockInlineBucketSequence, "Sequence", value.Span.Start+8, 8)
+		} else {
+			assertHexFieldChild(t, value.Children, blockBucketRootPage, "Root page", value.Span.Start, 8)
+			assertHexFieldChild(t, value.Children, blockBucketSequence, "Sequence", value.Span.Start+8, 8)
+		}
 	}
 	if !wantBucket && testFieldValue(entry.Rows, "Type") != "key/value" {
 		t.Fatalf("leaf entry type = %q, want key/value", testFieldValue(entry.Rows, "Type"))

@@ -2448,7 +2448,7 @@ func TestBboltBucketValueFieldDrillNavigationAndHighlight(t *testing.T) {
 					Children: []storage.HexBlock{
 						{Kind: drillChildBucketRootPage, Title: "Root page", Span: storage.ByteSpan{Start: 16, Size: 8}},
 						{Kind: drillChildBucketSequence, Title: "Sequence", Span: storage.ByteSpan{Start: 24, Size: 8}},
-						{Kind: pageBlockPageHeader, Title: "Inline Page Header", Span: storage.ByteSpan{Start: 32, Size: 16}},
+						{Kind: pageBlockInlinePageHeader, Title: "Inline Page Header", Span: storage.ByteSpan{Start: 32, Size: 16}},
 					},
 				},
 			},
@@ -2469,7 +2469,7 @@ func TestBboltBucketValueFieldDrillNavigationAndHighlight(t *testing.T) {
 	if !ok || root.kind != drillChildBucketRootPage || root.meta != (storage.ByteSpan{Start: 16, Size: 8}) {
 		t.Fatalf("selected bucket field = %+v, want root page bytes 16..23", root)
 	}
-	if m.currentDrillChildren()[0].kind != drillChildBucketRootPage || m.currentDrillChildren()[1].kind != drillChildBucketSequence || m.currentDrillChildren()[2].kind != pageBlockPageHeader {
+	if m.currentDrillChildren()[0].kind != drillChildBucketRootPage || m.currentDrillChildren()[1].kind != drillChildBucketSequence || m.currentDrillChildren()[2].kind != pageBlockInlinePageHeader {
 		t.Fatalf("bucket value children order = %+v, want root, sequence, inline page header", m.currentDrillChildren())
 	}
 	if !m.moveDrillChild(1) {
@@ -2539,6 +2539,30 @@ func TestBboltLeafStylesAreContrasting(t *testing.T) {
 				t.Fatalf("%s and %s render with the same drill style %q", leftName, rightName, left)
 			}
 		}
+	}
+
+	inline := map[string]string{
+		"header":      fmt.Sprint(drillChildStyle(pageBlockInlinePageHeader).GetForeground()),
+		"descriptors": fmt.Sprint(drillChildStyle(pageBlockInlineLeafDescriptors).GetForeground()),
+		"entry":       fmt.Sprint(drillChildStyle(pageBlockInlineLeafEntry).GetForeground()),
+		"key":         fmt.Sprint(drillChildStyle(pageBlockInlineLeafKey).GetForeground()),
+		"value":       fmt.Sprint(drillChildStyle(pageBlockInlineLeafValue).GetForeground()),
+	}
+	for leftName, left := range inline {
+		for rightName, right := range inline {
+			if leftName >= rightName {
+				continue
+			}
+			if left == right {
+				t.Fatalf("%s and %s render with the same inline drill style %q", leftName, rightName, left)
+			}
+		}
+	}
+	if inline["entry"] == fmt.Sprint(drillChildStyle(drillChildLeafEntry).GetForeground()) {
+		t.Fatalf("inline leaf entry style matches top-level leaf entry style %q", inline["entry"])
+	}
+	if inline["value"] == fmt.Sprint(drillChildStyle(drillChildLeafValue).GetForeground()) {
+		t.Fatalf("inline leaf value style matches top-level leaf value style %q", inline["value"])
 	}
 }
 

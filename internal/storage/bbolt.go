@@ -12,25 +12,37 @@ import (
 )
 
 const (
-	blockMetaPayload         = "meta_payload"
-	blockFreelistPayload     = "freelist_payload"
-	blockFreelistID          = "freelist_id"
-	blockBranchDescriptors   = "branch_descriptors"
-	blockBranchEntry         = "branch_entry"
-	blockBranchDescriptor    = "branch_descriptor"
-	blockLeafDescriptors     = "leaf_descriptors"
-	blockLeafEntry           = "leaf_entry"
-	blockLeafDescriptor      = "leaf_descriptor"
-	blockLeafKey             = "leaf_key"
-	blockLeafValue           = "leaf_value"
-	blockDescriptorFlags     = "descriptor_flags"
-	blockDescriptorPosition  = "descriptor_position"
-	blockDescriptorKeySize   = "descriptor_key_size"
-	blockDescriptorValueSize = "descriptor_value_size"
-	blockDescriptorChildPage = "descriptor_child_page"
-	blockBucketRootPage      = "bucket_root_page"
-	blockBucketSequence      = "bucket_sequence"
-	blockBboltOverflowExtent = "bbolt_overflow_extent"
+	blockMetaPayload               = "meta_payload"
+	blockFreelistPayload           = "freelist_payload"
+	blockFreelistID                = "freelist_id"
+	blockBranchDescriptors         = "branch_descriptors"
+	blockBranchEntry               = "branch_entry"
+	blockBranchDescriptor          = "branch_descriptor"
+	blockLeafDescriptors           = "leaf_descriptors"
+	blockLeafEntry                 = "leaf_entry"
+	blockLeafDescriptor            = "leaf_descriptor"
+	blockLeafKey                   = "leaf_key"
+	blockLeafValue                 = "leaf_value"
+	blockInlinePageHeader          = "inline_page_header"
+	blockInlineLeafDescriptors     = "inline_leaf_descriptors"
+	blockInlineLeafEntry           = "inline_leaf_entry"
+	blockInlineLeafDescriptor      = "inline_leaf_descriptor"
+	blockInlineLeafKey             = "inline_leaf_key"
+	blockInlineLeafValue           = "inline_leaf_value"
+	blockDescriptorFlags           = "descriptor_flags"
+	blockDescriptorPosition        = "descriptor_position"
+	blockDescriptorKeySize         = "descriptor_key_size"
+	blockDescriptorValueSize       = "descriptor_value_size"
+	blockDescriptorChildPage       = "descriptor_child_page"
+	blockBucketRootPage            = "bucket_root_page"
+	blockBucketSequence            = "bucket_sequence"
+	blockInlineDescriptorFlags     = "inline_descriptor_flags"
+	blockInlineDescriptorPosition  = "inline_descriptor_position"
+	blockInlineDescriptorKeySize   = "inline_descriptor_key_size"
+	blockInlineDescriptorValueSize = "inline_descriptor_value_size"
+	blockInlineBucketRootPage      = "inline_bucket_root_page"
+	blockInlineBucketSequence      = "inline_bucket_sequence"
+	blockBboltOverflowExtent       = "bbolt_overflow_extent"
 )
 
 type bboltDatabase struct {
@@ -622,7 +634,7 @@ func adaptBboltLeafPage(page *bbolt.BTreePage) ([]Field, []HexBlock) {
 		})
 
 		descriptorChildren = append(descriptorChildren, bboltLeafDescriptorBlock(idx, element))
-		entryBlocks = append(entryBlocks, bboltLeafEntryBlock(idx, element, kv, entryType, bucket, inline))
+		entryBlocks = append(entryBlocks, bboltLeafEntryBlock(idx, element, kv, entryType, bucket, inline, false))
 	}
 	rows = append(rows, Field{Label: "Bucket entries", Value: strconv.Itoa(bucketEntries)})
 
@@ -645,10 +657,16 @@ func adaptBboltLeafPage(page *bbolt.BTreePage) ([]Field, []HexBlock) {
 	return rows, blocks
 }
 
-func bboltLeafEntryBlock(idx int, element bbolt.LeafElement, kv bbolt.KeyValue, entryType string, bucket *bbolt.NestedBucket, inline *bbolt.InlineBucket) HexBlock {
+func bboltLeafEntryBlock(idx int, element bbolt.LeafElement, kv bbolt.KeyValue, entryType string, bucket *bbolt.NestedBucket, inline *bbolt.InlineBucket, insideInlinePage bool) HexBlock {
+	leafEntryKind := blockLeafEntry
+	leafKeyKind := blockLeafKey
+	if insideInlinePage {
+		leafEntryKind = blockInlineLeafEntry
+		leafKeyKind = blockInlineLeafKey
+	}
 	children := []HexBlock{
-		bboltLeafPayloadBlock(idx, "key", blockLeafKey, kv.Key.Meta, len(kv.Key.Data), bboltKeyLabel(kv.Key.Data)),
-		bboltLeafValueBlock(idx, kv.Value, bucket, inline),
+		bboltLeafPayloadBlock(idx, "key", leafKeyKind, kv.Key.Meta, len(kv.Key.Data), bboltKeyLabel(kv.Key.Data)),
+		bboltLeafValueBlock(idx, kv.Value, bucket, inline, insideInlinePage),
 	}
 
 	rows := []Field{
@@ -681,7 +699,7 @@ func bboltLeafEntryBlock(idx int, element bbolt.LeafElement, kv bbolt.KeyValue, 
 
 	return HexBlock{
 		ID:       fmt.Sprintf("leaf-entry-%d", idx),
-		Kind:     blockLeafEntry,
+		Kind:     leafEntryKind,
 		Title:    fmt.Sprintf("Leaf Entry %d", idx),
 		Span:     bboltSpanFromMeta(kv.Meta),
 		Rows:     rows,
@@ -689,7 +707,11 @@ func bboltLeafEntryBlock(idx int, element bbolt.LeafElement, kv bbolt.KeyValue, 
 	}
 }
 
-func bboltLeafValueBlock(idx int, value bbolt.Payload, bucket *bbolt.NestedBucket, inline *bbolt.InlineBucket) HexBlock {
+func bboltLeafValueBlock(idx int, value bbolt.Payload, bucket *bbolt.NestedBucket, inline *bbolt.InlineBucket, insideInlinePage bool) HexBlock {
+	leafValueKind := blockLeafValue
+	if insideInlinePage {
+		leafValueKind = blockInlineLeafValue
+	}
 	rows := []Field{
 		{Label: fmt.Sprintf("Leaf Entry %d Value", idx), Value: ""},
 		{Label: "Offset", Value: bboltOffsetRange(value.Meta)},
@@ -714,7 +736,7 @@ func bboltLeafValueBlock(idx int, value bbolt.Payload, bucket *bbolt.NestedBucke
 			Field{Label: "Root page", Value: bboltBucketRootLabel(bucket.Root.Value), Span: bboltSpanPtr(bucket.Root.Meta)},
 			Field{Label: "Sequence", Value: strconv.FormatUint(bucket.Sequence.Value, 10), Span: bboltSpanPtr(bucket.Sequence.Meta)},
 		)
-		children = append(children, bboltBucketHeaderFieldBlocks(idx, *bucket)...)
+		children = append(children, bboltBucketHeaderFieldBlocks(idx, *bucket, inline != nil || insideInlinePage)...)
 	}
 	if inline != nil {
 		rows = append(rows, Field{Label: "Storage", Value: "embedded in parent leaf value"})
@@ -723,7 +745,7 @@ func bboltLeafValueBlock(idx int, value bbolt.Payload, bucket *bbolt.NestedBucke
 
 	return HexBlock{
 		ID:       fmt.Sprintf("leaf-entry-%d-value", idx),
-		Kind:     blockLeafValue,
+		Kind:     leafValueKind,
 		Title:    fmt.Sprintf("Leaf Entry %d Value", idx),
 		Span:     bboltSpanFromMeta(value.Meta),
 		Rows:     rows,
@@ -731,18 +753,24 @@ func bboltLeafValueBlock(idx int, value bbolt.Payload, bucket *bbolt.NestedBucke
 	}
 }
 
-func bboltBucketHeaderFieldBlocks(idx int, bucket bbolt.NestedBucket) []HexBlock {
+func bboltBucketHeaderFieldBlocks(idx int, bucket bbolt.NestedBucket, inlineBucket bool) []HexBlock {
+	rootKind := blockBucketRootPage
+	sequenceKind := blockBucketSequence
+	if inlineBucket {
+		rootKind = blockInlineBucketRootPage
+		sequenceKind = blockInlineBucketSequence
+	}
 	return []HexBlock{
 		bboltFieldBlock(
 			fmt.Sprintf("leaf-entry-%d-bucket-root-page", idx),
-			blockBucketRootPage,
+			rootKind,
 			"Root page",
 			bucket.Root.Meta,
 			bboltBucketRootLabel(bucket.Root.Value),
 		),
 		bboltFieldBlock(
 			fmt.Sprintf("leaf-entry-%d-bucket-sequence", idx),
-			blockBucketSequence,
+			sequenceKind,
 			"Sequence",
 			bucket.Sequence.Meta,
 			strconv.FormatUint(bucket.Sequence.Value, 10),
@@ -773,7 +801,7 @@ func bboltInlineBucketPageChildren(idx int, inline bbolt.InlineBucket) []HexBloc
 			}
 			bucketIndex++
 		}
-		children = append(children, bboltLeafEntryBlock(childIdx, element, kv, entryType, bucket, childInline))
+		children = append(children, bboltLeafEntryBlock(childIdx, element, kv, entryType, bucket, childInline, true))
 	}
 	return children
 }
@@ -781,7 +809,7 @@ func bboltInlineBucketPageChildren(idx int, inline bbolt.InlineBucket) []HexBloc
 func bboltInlinePageHeaderBlock(idx int, header bbolt.PageHeader) HexBlock {
 	return HexBlock{
 		ID:    fmt.Sprintf("leaf-entry-%d-inline-page-header", idx),
-		Kind:  blockPageHeader,
+		Kind:  blockInlinePageHeader,
 		Title: fmt.Sprintf("Leaf Entry %d Inline Page Header", idx),
 		Span:  bboltSpanFromMeta(header.Meta),
 		Rows: []Field{
@@ -801,7 +829,7 @@ func bboltInlinePageHeaderBlock(idx int, header bbolt.PageHeader) HexBlock {
 func bboltInlineLeafDescriptorListBlock(idx int, payload bbolt.LeafPayload) HexBlock {
 	children := make([]HexBlock, 0, len(payload.LeafElements))
 	for childIdx, element := range payload.LeafElements {
-		children = append(children, bboltLeafDescriptorBlock(childIdx, element))
+		children = append(children, bboltInlineLeafDescriptorBlock(childIdx, element))
 	}
 	span := bboltLeafDescriptorsSpan(payload.LeafElements)
 	if len(payload.LeafElements) == 0 {
@@ -809,7 +837,7 @@ func bboltInlineLeafDescriptorListBlock(idx int, payload bbolt.LeafPayload) HexB
 	}
 	return HexBlock{
 		ID:       fmt.Sprintf("leaf-entry-%d-inline-leaf-descriptors", idx),
-		Kind:     blockLeafDescriptors,
+		Kind:     blockInlineLeafDescriptors,
 		Title:    fmt.Sprintf("Leaf Entry %d Inline Leaf Descriptors", idx),
 		Span:     span,
 		Children: children,
@@ -833,6 +861,27 @@ func bboltLeafDescriptorBlock(idx int, element bbolt.LeafElement) HexBlock {
 		Children: bboltLeafDescriptorFieldBlocks(idx, element),
 		Rows: []Field{
 			{Label: fmt.Sprintf("Leaf Entry %d Descriptor", idx), Value: ""},
+			{Label: "Offset", Value: bboltOffsetRange(element.Meta)},
+			{Label: "Size", Value: byteCount(element.Meta.Size)},
+			Blank(),
+			Section("FIELDS"),
+			{Label: "Flags", Value: bboltLeafFlagLabel(element.Flags.Value), Span: bboltSpanPtr(element.Flags.Meta)},
+			{Label: "Position", Value: strconv.FormatUint(uint64(element.Pos.Value), 10), Span: bboltSpanPtr(element.Pos.Meta)},
+			{Label: "Key size", Value: byteCount(int(element.KeySize.Value)), Span: bboltSpanPtr(element.KeySize.Meta)},
+			{Label: "Value size", Value: byteCount(int(element.ValueSize.Value)), Span: bboltSpanPtr(element.ValueSize.Meta)},
+		},
+	}
+}
+
+func bboltInlineLeafDescriptorBlock(idx int, element bbolt.LeafElement) HexBlock {
+	return HexBlock{
+		ID:       fmt.Sprintf("leaf-entry-%d-inline-descriptor", idx),
+		Kind:     blockInlineLeafDescriptor,
+		Title:    fmt.Sprintf("Leaf Entry %d Inline Descriptor", idx),
+		Span:     bboltSpanFromMeta(element.Meta),
+		Children: bboltInlineLeafDescriptorFieldBlocks(idx, element),
+		Rows: []Field{
+			{Label: fmt.Sprintf("Leaf Entry %d Inline Descriptor", idx), Value: ""},
 			{Label: "Offset", Value: bboltOffsetRange(element.Meta)},
 			{Label: "Size", Value: byteCount(element.Meta.Size)},
 			Blank(),
@@ -871,6 +920,39 @@ func bboltLeafDescriptorFieldBlocks(idx int, element bbolt.LeafElement) []HexBlo
 		bboltFieldBlock(
 			fmt.Sprintf("leaf-entry-%d-descriptor-value-size", idx),
 			blockDescriptorValueSize,
+			"Value size",
+			element.ValueSize.Meta,
+			byteCount(int(element.ValueSize.Value)),
+		),
+	}
+}
+
+func bboltInlineLeafDescriptorFieldBlocks(idx int, element bbolt.LeafElement) []HexBlock {
+	return []HexBlock{
+		bboltFieldBlock(
+			fmt.Sprintf("leaf-entry-%d-inline-descriptor-flags", idx),
+			blockInlineDescriptorFlags,
+			"Flags",
+			element.Flags.Meta,
+			bboltLeafFlagLabel(element.Flags.Value),
+		),
+		bboltFieldBlock(
+			fmt.Sprintf("leaf-entry-%d-inline-descriptor-position", idx),
+			blockInlineDescriptorPosition,
+			"Position",
+			element.Pos.Meta,
+			strconv.FormatUint(uint64(element.Pos.Value), 10),
+		),
+		bboltFieldBlock(
+			fmt.Sprintf("leaf-entry-%d-inline-descriptor-key-size", idx),
+			blockInlineDescriptorKeySize,
+			"Key size",
+			element.KeySize.Meta,
+			byteCount(int(element.KeySize.Value)),
+		),
+		bboltFieldBlock(
+			fmt.Sprintf("leaf-entry-%d-inline-descriptor-value-size", idx),
+			blockInlineDescriptorValueSize,
 			"Value size",
 			element.ValueSize.Meta,
 			byteCount(int(element.ValueSize.Value)),

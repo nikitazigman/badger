@@ -2196,6 +2196,12 @@ var (
 	leafDescriptorHexByteStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
 	leafKeyHexByteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
 	leafValueHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	inlineHeaderHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	inlineDescriptorHexByteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("183"))
+	inlineEntryHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("209"))
+	inlineKeyHexByteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("51"))
+	inlineValueHexByteStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("219"))
+	inlineBucketHexByteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
 	errorStyle                   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	scrollbarTrackStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollbarThumbStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
@@ -2235,6 +2241,20 @@ func drillChildStyle(kind string) lipgloss.Style {
 		return leafDescriptorHexByteStyle
 	case drillChildBucketRootPage, drillChildBucketSequence:
 		return leafValueHexByteStyle
+	case pageBlockInlinePageHeader:
+		return inlineHeaderHexByteStyle
+	case pageBlockInlineLeafDescriptors, pageBlockInlineLeafDescriptor,
+		pageBlockInlineDescriptorFlags, pageBlockInlineDescriptorPosition,
+		pageBlockInlineDescriptorKeySize, pageBlockInlineDescriptorValueSize:
+		return inlineDescriptorHexByteStyle
+	case pageBlockInlineLeafEntry:
+		return inlineEntryHexByteStyle
+	case pageBlockInlineLeafKey:
+		return inlineKeyHexByteStyle
+	case pageBlockInlineLeafValue:
+		return inlineValueHexByteStyle
+	case pageBlockInlineBucketRootPage, pageBlockInlineBucketSequence:
+		return inlineBucketHexByteStyle
 	default:
 		return cellHexByteStyle
 	}
@@ -2262,6 +2282,20 @@ func blockStyle(kind string) lipgloss.Style {
 		return leafValueHexByteStyle
 	case pageBlockLeafEntry:
 		return cellHexByteStyle
+	case pageBlockInlinePageHeader:
+		return inlineHeaderHexByteStyle
+	case pageBlockInlineLeafDescriptors, pageBlockInlineLeafDescriptor,
+		pageBlockInlineDescriptorFlags, pageBlockInlineDescriptorPosition,
+		pageBlockInlineDescriptorKeySize, pageBlockInlineDescriptorValueSize:
+		return inlineDescriptorHexByteStyle
+	case pageBlockInlineLeafEntry:
+		return inlineEntryHexByteStyle
+	case pageBlockInlineLeafKey:
+		return inlineKeyHexByteStyle
+	case pageBlockInlineLeafValue:
+		return inlineValueHexByteStyle
+	case pageBlockInlineBucketRootPage, pageBlockInlineBucketSequence:
+		return inlineBucketHexByteStyle
 	case pageBlockPointerArray:
 		return pointerArrayHexByteStyle
 	case pageBlockFreeblock:
