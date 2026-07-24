@@ -2,22 +2,29 @@
   <img src="docs/screenshots/badger-github-header.png" alt="Badger logo" width="1980" align="center">
 </p>
 
-
 Badger is a terminal UI for exploring SQLite and bbolt/BoltDB-compatible database files at the byte and page level.
 
-It is built for people who want to understand how embedded databases store data internally, using real files instead of logical query output. Badger detects supported formats by file content and lets you inspect database headers, storage objects, b-tree page sets, pages, cells, records, bucket entries, payloads, and raw byte ranges directly from the terminal.
+Use it to open a real database file and see how the data is laid out on disk: headers, b-trees, pages, cells, records, buckets, freelist data, overflow pages, continuation pages, and raw byte ranges.
+
+Badger is built for learning, debugging, and inspecting embedded database internals from the terminal. It detects supported formats from file contents, so SQLite and bbolt files do not need special extensions.
 
 ![Badger database overview](docs/screenshots/main_page.png)
 
-## Pre-Alpha Notice
+## Demo
 
-Badger is experimental and changing quickly. Commands, parser behavior, and TUI output may change as the project evolves.
+![Badger demo inspecting a Kubernetes etcd bbolt database](docs/demo/k8s-etcd-bbolt-demo.gif)
 
-The current focus is read-only inspection of SQLite and bbolt/BoltDB-compatible files. Badger is not a SQL client, does not mutate files, and does not decode application-specific bbolt values beyond bbolt-owned storage structures.
+## Why Use Badger?
+
+- Learn how SQLite and bbolt/BoltDB-compatible files are structured using real database files.
+- Inspect storage objects, physical pages, parsed metadata, and matching byte ranges in one TUI.
+- Explore bbolt files used by tools such as etcd without writing custom parser code.
+- Keep inspection read-only: Badger does not mutate database files.
+- See storage structures directly instead of only viewing logical SQL query output or application-level values.
 
 ## Requirements
 
-- Go `1.26.1`
+- Go `1.25` or newer
 - A terminal with enough space for the TUI panes
 
 ## Quick Start
@@ -28,7 +35,21 @@ Install with Go:
 go install github.com/nikitazigman/badger/cmd/badger@latest
 ```
 
-Make sure your Go binary directory is on your `PATH`. You can check it with:
+Open a database file:
+
+```bash
+badger path/to/database.db
+```
+
+Or try one of the included fixtures from a source checkout:
+
+```bash
+make build
+./bin/badger fixtures/companies.db
+./bin/badger fixtures/bbolt/users.db
+```
+
+If `badger` is not found after `go install`, make sure your Go binary directory is on your `PATH`:
 
 ```bash
 go env GOPATH
@@ -36,34 +57,22 @@ go env GOPATH
 
 By default, Go installs binaries into `$(go env GOPATH)/bin`.
 
-Build the binary:
+## Status
 
-```bash
-make build
-```
+Badger is pre-alpha and changing quickly. Commands, parser behavior, and TUI output may change as the project evolves.
 
-Run Badger against one of the included fixture databases:
+The current focus is read-only inspection of SQLite and bbolt/BoltDB-compatible files. Badger is not a SQL client, does not mutate files, and does not decode application-specific bbolt values beyond bbolt-owned storage structures.
 
-```bash
-./bin/badger fixtures/companies.db
-```
+## Usage
 
-Or open one of the included bbolt fixtures:
-
-```bash
-./bin/badger fixtures/bbolt/users.db
+```text
+badger <database-file>
 ```
 
 You can also run it through Go:
 
 ```bash
 make run ARGS="fixtures/companies.db"
-```
-
-## Usage
-
-```text
-badger <database-file>
 ```
 
 Examples:
@@ -92,8 +101,6 @@ For bbolt databases, Badger can inspect meta pages, freelist pages, branch pages
 ## TUI Navigation
 
 Badger opens directly into an interactive TUI.
-
-https://github.com/user-attachments/assets/f069f4f8-37b1-4748-ad33-55c68fe0ae27
 
 The interface has four key-labeled sections across three visual panes:
 
